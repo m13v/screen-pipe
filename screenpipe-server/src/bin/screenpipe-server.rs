@@ -162,6 +162,16 @@ async fn main() -> anyhow::Result<()> {
                 // ! assuming silero is used
                 SileroVad::new().await.unwrap();
 
+                // Check if FFmpeg is working properly
+                match check_ffmpeg().await {
+                    Ok(_) => info!("FFmpeg is working properly"),
+                    Err(e) => {
+                        error!("FFmpeg check failed: {}", e);
+                        error!("Please ensure FFmpeg is installed correctly and is in your PATH");
+                        return Err(e.into());
+                    }
+                }
+
                 info!("screenpipe setup complete");
                 // TODO: ffmpeg sidecar thing here
                 return Ok(());
@@ -483,7 +493,15 @@ async fn main() -> anyhow::Result<()> {
     // Function to truncate and pad strings
     fn format_cell(s: &str, width: usize) -> String {
         if s.len() > width {
-            format!("{}...", &s[..width - 3])
+            let mut max_pos = 0;
+            for (i, c) in s.char_indices() {
+                if i + c.len_utf8() > width - 3 {
+                    break;
+                }
+                max_pos = i + c.len_utf8();
+            }
+    
+            format!("{}...", &s[..max_pos])
         } else {
             format!("{:<width$}", s, width = width)
         }
@@ -784,5 +802,22 @@ async fn handle_pipe_command(pipe: PipeCommand, pipe_manager: &PipeManager) -> a
             }
         },
     }
+    Ok(())
+}
+
+// Add this function near the end of the file
+async fn check_ffmpeg() -> anyhow::Result<()> {
+    // TODO: this should also check if it can properly encode mp4 etc
+    use tokio::process::Command;
+
+    let output = Command::new("ffmpeg")
+        .arg("-version")
+        .output().await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("FFmpeg check failed: {}", stderr));
+    }
+
     Ok(())
 }
