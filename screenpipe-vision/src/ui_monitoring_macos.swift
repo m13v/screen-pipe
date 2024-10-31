@@ -5,12 +5,14 @@ import SQLite3
 
 // Define WindowState struct first
 struct WindowState {
-    var elements: [AXUIElementWrapper: ElementAttributes]
+    var elements: [String: ElementAttributes]
     var textOutput: String
+    var timestamp: Date
 
     init() {
         self.elements = [:]
         self.textOutput = ""
+        self.timestamp = Date()
     }
 }
 
@@ -29,6 +31,9 @@ var currentObserver: AXObserver? {
 }
 var monitoringEventLoop: CFRunLoop?
 var hasChanges = false
+// Debounce mechanism variables
+var pendingNotifications = [(startElement: AXUIElement, depth: Int)]()
+var debounceTimer: DispatchSourceTimer?
 
 // Add global context structure
 class MonitoringContext {
@@ -78,6 +83,31 @@ struct ElementAttributes {
     var width: CGFloat
     var height: CGFloat
     var children: [ElementAttributes]
+    var timestamp: Date
+    
+    // Add computed property for unique identifier
+    var identifier: String {
+        // Combine path with sorted attributes to create a stable identifier
+        let attributesString = attributes.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "|")
+        return "\(path)#\(attributesString)"
+    }
+
+    init(element: String, path: String, attributes: [String: String], depth: Int,
+         x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, children: [ElementAttributes],
+         timestamp: Date = Date()) {
+        self.element = element
+        self.path = path
+        self.attributes = attributes
+        self.depth = depth
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.children = children
+        self.timestamp = timestamp
+    }
 }
 
 // Add traversal state management
@@ -101,6 +131,46 @@ var changedWindows = Set<WindowIdentifier>()
 let synchronizationQueue = DispatchQueue(label: "com.screenpipe.synchronization")
 var isCleaningUp = false
 
+// JSON state structure
+struct UIMonitoringState: Codable {
+    var ignoredApps: [String]
+    
+    init(ignoredApps: [String] = []) {
+        self.ignoredApps = ignoredApps
+    }
+}
+
+// Function to get state file path
+func getStateFilePath() -> String {
+    let paths = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+    let appSupportDir = paths[0].appendingPathComponent("screenpipe")
+    
+    // Create directory if it doesn't exist
+    try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+    
+    return appSupportDir.appendingPathComponent("uiMonitoringLogs.json").path
+}
+
+// Function to load or create state
+func loadOrCreateState() -> UIMonitoringState {
+    let path = getStateFilePath()
+    
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+       let state = try? JSONDecoder().decode(UIMonitoringState.self, from: data) {
+        return state
+    }
+    
+    // Create default state
+    let defaultState = UIMonitoringState()
+    
+    // Save default state
+    if let encoded = try? JSONEncoder().encode(defaultState) {
+        try? encoded.write(to: URL(fileURLWithPath: path))
+    }
+    
+    return defaultState
+}
+
 // Start monitoring
 startMonitoring()
 
@@ -112,6 +182,7 @@ func startMonitoring() {
     }
 
     setupDatabase()
+    print("loaded ui_monitoring logs state")
     setupApplicationChangeObserver()
     monitorCurrentFrontmostApplication()
 
@@ -175,10 +246,29 @@ func monitorCurrentFrontmostApplication() {
         return
     }
 
+    // Sanitize app name by removing invisible characters and trimming
+    let appName = (app.localizedName?.lowercased() ?? "unknown app")
+        .components(separatedBy: CharacterSet.controlCharacters).joined()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // First check if app should be ignored
+    var state = loadOrCreateState()
+    if state.ignoredApps.contains(appName) {
+        print("skipping ignored app: \(appName)")
+        return
+    }
+
+    // Check if app exists in global state
+    if globalElementValues[appName] == nil {
+        // Only add to ignored list if app isn't being monitored yet
+        state.ignoredApps.append(appName)
+        if let encoded = try? JSONEncoder().encode(state) {
+            try? encoded.write(to: URL(fileURLWithPath: getStateFilePath()))
+        }
+    }
+
     let pid = app.processIdentifier
     let axApp = AXUIElementCreateApplication(pid)
-
-    let appName = app.localizedName?.lowercased() ?? "unknown app"
 
     // Get window name BEFORE initializing structures
     var windowName = "unknown window"
@@ -186,11 +276,18 @@ func monitorCurrentFrontmostApplication() {
     let result = AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &windowValue)
     if result == .success, let window = windowValue as! AXUIElement? {
         if let titleValue = getAttributeValue(window, forAttribute: kAXTitleAttribute) as? String {
+            // Sanitize window name immediately when we get it
             windowName = titleValue.lowercased()
+                .components(separatedBy: CharacterSet.controlCharacters).joined()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
-    // Initialize app and window in the structure with correct window name
+    // Check if we already have recent data for this window
+    let windowExists = globalElementValues[appName]?[windowName] != nil
+    let isWindowRecent = globalElementValues[appName]?[windowName]?.timestamp.timeIntervalSinceNow ?? -Double.infinity > -300 // 5 minutes
+
+    // Initialize app and window in the structure if needed
     if globalElementValues[appName] == nil {
         globalElementValues[appName] = [:]
     }
@@ -198,14 +295,19 @@ func monitorCurrentFrontmostApplication() {
         globalElementValues[appName]?[windowName] = WindowState()
     }
 
-    // First do initial UI traverse with app and window context
-    traverseAndStoreUIElements(axApp, appName: appName, windowName: windowName)
-    hasChanges = true  // Ensure first scan gets saved
+    if !windowExists || !isWindowRecent {
+        // Only traverse if window doesn't exist or data is old
+        print("traversing ui elements for \(appName), window: \(windowName)...")
+        traverseAndStoreUIElements(axApp, appName: appName, windowName: windowName)
+        hasChanges = true
+    } else {
+        print("reusing existing ui elements for \(appName), window: \(windowName)...")
+    }
 
-    // Then set up notifications
-    setupAccessibilityNotifications(pid: pid, axApp: axApp, appName: appName, windowName: windowName)  // Pass context
+    // Always set up notifications
+    setupAccessibilityNotifications(pid: pid, axApp: axApp, appName: appName, windowName: windowName)
 
-    print("monitoring changes for \(app.localizedName?.lowercased() ?? "unknown app"), window: \(windowName.lowercased())...")
+    print("monitoring changes for \(appName), window: \(windowName)...")
     print("press ctrl+c to stop")
 }
 
@@ -236,12 +338,9 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
     isTraversing = true
     shouldCancelTraversal = false
 
-    // Reset the elements for the current window before traversal
-    globalElementValues[appName]?[windowName]?.elements = [:]
-
     let startTime = DispatchTime.now()
     var visitedElements = Set<AXUIElementWrapper>()
-    let unwantedValues = ["0", "", "3"]
+    let unwantedValues = ["0", "", "\u{200E}", "3", "\u{200F}"]  // LRM and RLM marks
     let unwantedLabels = [
         "window", "application", "group", "button", "image", "text",
         "pop up button", "region", "notifications", "table", "column",
@@ -249,12 +348,24 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
     ]
     let attributesToCheck = ["AXDescription", "AXValue", "AXLabel", "AXRoleDescription", "AXHelp"]
 
-    // Add totalCharacterCount variable to cap the traversed content at 1 million characters
+    // Add character count tracking
     var totalCharacterCount = 0
 
     func traverse(_ element: AXUIElement, depth: Int) -> ElementAttributes? {
-        // Check for cancellation
-        if shouldCancelTraversal || totalCharacterCount >= 1_000_000 {
+        // Add check for AXMenuBar at the start
+        if let role = getAttributeValue(element, forAttribute: "AXRole") as? String,
+           role == "AXMenuBar" {
+            return nil
+        }
+
+        // Add depth limit check
+        if depth > 100 {
+            print("max depth reached: depth=\(depth), app=\(appName), window=\(windowName)")
+            return nil
+        }
+
+        // Check for cancellation or character limit
+        if shouldCancelTraversal || totalCharacterCount >= 100_000 {
             if totalCharacterCount >= 1_000_000 {
                 print("hit 1mln char limit for app: \(appName), window: \(windowName)")
             }
@@ -290,7 +401,7 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
         let elementDesc = (getAttributeValue(element, forAttribute: "AXRole") as? String) ?? "Unknown"
 
         // Get path
-        let path = getElementPath(element)
+        let (path, depth) = getElementPath(element)
 
         var elementAttributes = ElementAttributes(
             element: elementDesc,
@@ -301,7 +412,8 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
             y: position.y,
             width: size.width,
             height: size.height,
-            children: []
+            children: [],
+            timestamp: Date()
         )
 
         var hasRelevantValue = false
@@ -315,17 +427,9 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
                        !unwantedValues.contains(valueStr) &&
                        valueStr.count > 1 &&
                        !unwantedLabels.contains(valueStr.lowercased()) {
-                        // Before adding, check if adding this value would exceed the character limit
-                        let newTotal = totalCharacterCount + valueStr.count
-                        if newTotal > 1_000_000 {
-                            shouldCancelTraversal = true
-                            return nil
-                        } else {
-                            // Store attribute and its value
-                            elementAttributes.attributes[attr] = valueStr
-                            hasRelevantValue = true
-                            totalCharacterCount = newTotal
-                        }
+                        // Store attribute and its value
+                        elementAttributes.attributes[attr] = valueStr
+                        hasRelevantValue = true
                     }
                 }
             }
@@ -335,34 +439,38 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
         var childrenElements: [ElementAttributes] = []
         for attr in attributes {
             if let childrenValue = getAttributeValue(element, forAttribute: attr) {
+                // Check if it's an array of AXUIElements first
                 if let elementArray = childrenValue as? [AXUIElement] {
+                    if elementArray.count > 1000 {
+                        print("element at path \(path) has \(elementArray.count) children")
+                    }
                     for childElement in elementArray {
                         if let childAttributes = traverse(childElement, depth: depth + 1) {
                             childrenElements.append(childAttributes)
-                        } else if shouldCancelTraversal {
-                            break
                         }
                     }
                 } else if let childElement = childrenValue as! AXUIElement? {
                     if let childAttributes = traverse(childElement, depth: depth + 1) {
                         childrenElements.append(childAttributes)
-                    } else if shouldCancelTraversal {
-                        break
                     }
                 }
-            }
-            if shouldCancelTraversal {
-                break
             }
         }
         elementAttributes.children = childrenElements
 
         if hasRelevantValue || !childrenElements.isEmpty {
-            // Store the element with its attributes
-            globalElementValues[appName]?[windowName]?.elements[elementWrapper] = elementAttributes
+            // Store the element with its attributes using identifier as key
+            globalElementValues[appName]?[windowName]?.elements[elementAttributes.identifier] = elementAttributes
             return elementAttributes
         } else {
             return nil
+        }
+
+        // Update character count when storing values
+        if hasRelevantValue {
+            for value in elementAttributes.attributes.values {
+                totalCharacterCount += value.count
+            }
         }
     }
 
@@ -374,18 +482,32 @@ func traverseAndStoreUIElements(_ element: AXUIElement, appName: String, windowN
         isTraversing = false
         shouldCancelTraversal = false
 
+        // Mark window as changed to ensure first scan gets saved
+        hasChanges = true
+        changedWindows.insert(WindowIdentifier(app: appName, window: windowName))
+
+        // Update timestamp after traversal
+        globalElementValues[appName]?[windowName]?.timestamp = Date()
+
         let endTime = DispatchTime.now()
         let nanoTime = endTime.uptimeNanoseconds - startTime.uptimeNanoseconds
         let timeInterval = Double(nanoTime) / 1_000_000
         print("\(String(format: "%.2f", timeInterval))ms - ui traversal")
 
         measureGlobalElementValuesSize()
+
+        // Remove app from ignored list since traversal succeeded
+        var state = loadOrCreateState()
+        state.ignoredApps.removeAll(where: { $0 == appName })
+        if let encoded = try? JSONEncoder().encode(state) {
+            try? encoded.write(to: URL(fileURLWithPath: getStateFilePath()))
+        }
     }
 }
 
 func getRelevantValue(_ element: AXUIElement) -> String? {
     let attributesToCheck = ["AXDescription", "AXValue", "AXLabel", "AXRoleDescription", "AXHelp"]
-    let unwantedValues = ["0", "", "3"]
+    let unwantedValues = ["0", "", "\u{200E}", "3", "\u{200F}"]  // LRM and RLM marks
     let unwantedLabels = [
         "window", "application", "group", "button", "image", "text",
         "pop up button", "region", "notifications", "table", "column",
@@ -407,88 +529,207 @@ func getRelevantValue(_ element: AXUIElement) -> String? {
     return nil
 }
 
-// Modify axObserverCallback function
-func axObserverCallback(observer: AXObserver, element: AXUIElement, notification: CFString, refcon: UnsafeMutableRawPointer?) {
-    synchronizationQueue.async {
-        // Exit if cleanup has started
-        if isCleaningUp { return }
-
-        // Don't process notifications if traversal is in progress
-        if isTraversing { return }
-
-        guard let context = currentContext else { return }
-
-        let startTime = DispatchTime.now()
-        let notificationStr = notification as String
-
-        autoreleasepool {
-            // Initialize the visitedElements set
-            var visitedElements = Set<AXUIElementWrapper>()
-
-            // Recursively check for changes in the element and its children
-            let hasElementChanged = checkElementAndChildrenForChanges(
-                element: element,
-                context: context,
-                visitedElements: &visitedElements
-            )
-
-            if hasElementChanged {
-                hasChanges = true
-                changedWindows.insert(WindowIdentifier(app: context.appName, window: context.windowName))
-
-                let endTime = DispatchTime.now()
-                let timeInterval = Double(endTime.uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000
-                print("\(String(format: "%.2f", timeInterval))ms - element or its children updated")
-            }
-        }
-    }
-}
-
-// New function to recursively check for changes
-func checkElementAndChildrenForChanges(
-    element: AXUIElement,
-    context: MonitoringContext,
+func updateElementAndChildren(
+    _ element: AXUIElement,
+    appName: String, 
+    windowName: String,
     visitedElements: inout Set<AXUIElementWrapper>
 ) -> Bool {
-    var elementChanged = false
-
-    let elementWrapper = AXUIElementWrapper(element: element)
-
-    // Check if we've already visited this element
-    if visitedElements.contains(elementWrapper) {
+    // Add check for AXMenuBar at the start
+    if let role = getAttributeValue(element, forAttribute: "AXRole") as? String,
+       role == "AXMenuBar" {
         return false
     }
+
+    let elementWrapper = AXUIElementWrapper(element: element)
+    if visitedElements.contains(elementWrapper) { return false }
     visitedElements.insert(elementWrapper)
-
-    // Check if the element's relevant value has changed
+    
+    var hasUpdates = false
+    
+    // Get position and size
+    var position: CGPoint = .zero
+    var size: CGSize = .zero
+    
+    if let positionValue = getAttributeValue(element, forAttribute: kAXPositionAttribute) as! AXValue?,
+       AXValueGetType(positionValue) == .cgPoint {
+        AXValueGetValue(positionValue, .cgPoint, &position)
+    }
+    
+    if let sizeValue = getAttributeValue(element, forAttribute: kAXSizeAttribute) as! AXValue?,
+       AXValueGetType(sizeValue) == .cgSize {
+        AXValueGetValue(sizeValue, .cgSize, &size)
+    }
+    
+    // Get element description and full path with depth
+    let elementDesc = (getAttributeValue(element, forAttribute: "AXRole") as? String) ?? "unknown"
+    let (path, depth) = getElementPath(element)
+    
+    // Check if element has relevant value
     if let newValue = getRelevantValue(element) {
-        let existingAttributes = globalElementValues[context.appName]?[context.windowName]?.elements[elementWrapper]?.attributes
-        let oldValue = existingAttributes?.values.joined()
-
-        if oldValue != newValue {
-            // Update the element's attributes
-            if globalElementValues[context.appName]?[context.windowName]?.elements[elementWrapper] == nil {
-                // If the element is not in the global state, traverse and store it
-                traverseAndStoreUIElements(element, appName: context.appName, windowName: context.windowName)
-                return true
-            } else {
-                globalElementValues[context.appName]?[context.windowName]?.elements[elementWrapper]?.attributes["Value"] = newValue
-                elementChanged = true
-            }
+        let tempAttributes = ElementAttributes(
+            element: elementDesc,
+            path: path,
+            attributes: ["Value": newValue],
+            depth: depth,
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            children: [],
+            timestamp: Date()
+        )
+        let identifier = tempAttributes.identifier
+        
+        if globalElementValues[appName]?[windowName]?.elements[identifier] == nil {
+            // New element - create and store it directly
+            globalElementValues[appName]?[windowName]?.elements[identifier] = tempAttributes
+            hasUpdates = true
+        } else if globalElementValues[appName]?[windowName]?.elements[identifier]?.attributes["Value"] != newValue {
+            // Existing element with changed value
+            globalElementValues[appName]?[windowName]?.elements[identifier]?.attributes["Value"] = newValue
+            hasUpdates = true
         }
     }
-
-    // Recursively check children
+    
+    // Traverse children
     if let children = getAttributeValue(element, forAttribute: kAXChildrenAttribute) as? [AXUIElement] {
+        if children.count > 1000 {
+            let (path, _) = getElementPath(element)
+            print("element at path \(path) has \(children.count) children")
+        }
         for child in children {
-            if checkElementAndChildrenForChanges(element: child, context: context, visitedElements: &visitedElements) {
-                elementChanged = true
+            if updateElementAndChildren(child, appName: appName, windowName: windowName, visitedElements: &visitedElements) {
+                hasUpdates = true
             }
         }
     }
-
-    return elementChanged
+    
+    return hasUpdates
 }
+
+func handleFocusedWindowChange(element: AXUIElement) {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return }
+    let appName = app.localizedName?.lowercased() ?? "unknown app"
+
+    // Get the new window name
+    var windowName = "unknown window"
+    if let titleValue = getAttributeValue(element, forAttribute: kAXTitleAttribute) as? String {
+        windowName = titleValue.lowercased()
+            .components(separatedBy: CharacterSet.controlCharacters).joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // Check if this is actually a new window
+    let isNewWindow = currentContext?.windowName != windowName
+    
+    // Update the context
+    currentContext = MonitoringContext(appName: appName, windowName: windowName)
+
+    // Initialize window state if not present
+    if globalElementValues[appName] == nil {
+        globalElementValues[appName] = [:]
+    }
+    
+    // If it's a new window, create fresh state
+    if isNewWindow {
+        globalElementValues[appName]?[windowName] = WindowState()
+        print("new window detected: \(windowName)")
+    }
+
+    // Start traversing the new window
+    traverseAndStoreUIElements(element, appName: appName, windowName: windowName)
+    hasChanges = true
+}
+
+
+func axObserverCallback(observer: AXObserver, element: AXUIElement, notification: CFString, refcon: UnsafeMutableRawPointer?) {
+    synchronizationQueue.async {
+        // Check for window-related notifications
+        let notificationStr = notification as String
+        if notificationStr == kAXFocusedWindowChangedNotification as String ||
+           notificationStr == kAXMainWindowChangedNotification as String ||
+           notificationStr == kAXTitleChangedNotification as String {
+            
+            // For title changes, we need to check if it's a window
+            if notificationStr == kAXTitleChangedNotification as String {
+                if let role = getAttributeValue(element, forAttribute: "AXRole") as? String,
+                   role == "AXWindow" {
+                    handleFocusedWindowChange(element: element)
+                    return
+                }
+            } else {
+                handleFocusedWindowChange(element: element)
+                return
+            }
+        }
+
+        if isCleaningUp || isTraversing { return }
+        if currentContext == nil { return }  // Simplified check since we don't need the value yet
+
+        // Get parent and grandparent
+        let parent = getAttributeValue(element, forAttribute: "AXParent") as! AXUIElement?
+        var grandparent: AXUIElement? = nil
+        if let parent = parent {
+            grandparent = getAttributeValue(parent, forAttribute: "AXParent") as! AXUIElement?
+        }
+        
+        // Start from highest available ancestor
+        let startElement = grandparent ?? parent ?? element
+        
+        // Get the depth of the startElement
+        let (_, depth) = getElementPath(startElement)
+        
+        // Add to pending notifications
+        pendingNotifications.append((startElement: startElement, depth: depth))
+        
+        // Reset debounce timer
+        debounceTimer?.cancel()
+        debounceTimer = nil
+        
+        // Start a new debounce timer
+        debounceTimer = DispatchSource.makeTimerSource(queue: synchronizationQueue)
+        debounceTimer?.schedule(deadline: .now() + .milliseconds(200))
+        debounceTimer?.setEventHandler {
+            processPendingNotifications()
+        }
+        debounceTimer?.resume()
+    }
+}
+
+
+func processPendingNotifications() {
+    if isCleaningUp || isTraversing { return }
+    guard let context = currentContext else { return }
+    
+    let startTime = DispatchTime.now()
+    
+    autoreleasepool {
+        // Find the notification with the startElement of least depth
+        guard let selectedNotification = pendingNotifications.min(by: { $0.depth < $1.depth }) else {
+            pendingNotifications.removeAll()
+            return
+        }
+        
+        let startElement = selectedNotification.startElement
+        var visitedElements = Set<AXUIElementWrapper>()
+        
+        if updateElementAndChildren(startElement, appName: context.appName, windowName: context.windowName, visitedElements: &visitedElements) {
+            hasChanges = true
+            changedWindows.insert(WindowIdentifier(app: context.appName, window: context.windowName))
+        }
+    }
+    
+    let endTime = DispatchTime.now()
+    let timeInterval = Double(endTime.uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000
+    print("\(String(format: "%.2f", timeInterval))ms - processed pending notifications")
+    
+    // Clear pending notifications and reset debounceTimer
+    pendingNotifications.removeAll()
+    debounceTimer = nil
+}
+
+
 
 func setupAccessibilityNotifications(pid: pid_t, axApp: AXUIElement, appName: String, windowName: String) {
     // Store context globally with synchronization
@@ -571,7 +812,7 @@ func getAttributeValue(_ element: AXUIElement, forAttribute attr: String) -> Any
 func describeValue(_ value: AnyObject?) -> String {
     switch value {
     case let string as String:
-        return string
+        return string.replacingOccurrences(of: "\n", with: "\\n")
     case let number as NSNumber:
         return number.stringValue
     case let point as NSPoint:
@@ -621,9 +862,10 @@ func describeAXValue(_ axValue: AXValue) -> String {
     }
 }
 
-func getElementPath(_ element: AXUIElement) -> String {
+func getElementPath(_ element: AXUIElement) -> (path: String, depth: Int) {
     var path = [String]()
     var current: AXUIElement? = element
+    var depth = 0
 
     while current != nil {
         if let role = getAttributeValue(current!, forAttribute: "AXRole") as? String {
@@ -632,38 +874,66 @@ func getElementPath(_ element: AXUIElement) -> String {
                 elementDesc += "[\(title)]"
             }
             path.append(elementDesc)
+            depth += 1
         }
 
         // Get parent
         current = getAttributeValue(current!, forAttribute: "AXParent") as! AXUIElement?
     }
 
-    // Reverse and join with arrows
-    return path.reversed().joined(separator: " -> ")
+    // Reverse path but depth is already correct
+    return (path.reversed().joined(separator: " -> "), depth - 1)
 }
 
 func buildTextOutput(from windowState: WindowState) -> String {
     var textOutput = ""
-
-    func processElement(_ elementAttributes: ElementAttributes, indentLevel: Int) {
-        let indent = String(repeating: " ", count: indentLevel)
-
-        // build output
-        let text = elementAttributes.attributes.values
-            .map { "[\($0)]" }
-            .joined(separator: " ")
-
-        if !text.isEmpty {
-            textOutput += "\(indent)\(text)\n"
+    var processedElements = Set<String>()
+    var seenTexts = Set<String>() // Track unique text values
+    
+    // Helper function to process text values
+    func processText(_ text: String) -> String {
+        if seenTexts.contains(text) {
+            return "" // Return empty string for duplicate text
         }
-
+        seenTexts.insert(text)
+        return "[\(text)]"
+    }
+    
+    // Process hierarchical elements
+    func processElement(_ elementAttributes: ElementAttributes, indentLevel: Int) {
+        // One space per level
+        let indentStr = String(repeating: " ", count: indentLevel)
+        
+        // Process each attribute value and join with spaces
+        let text = elementAttributes.attributes.values
+            .filter { !seenTexts.contains($0) }
+            .map { 
+                seenTexts.insert($0)
+                return "[\($0)]"
+            }
+            .joined(separator: " ")
+        
+        if !text.isEmpty {
+            textOutput += "\(indentStr)\(text)\n"
+        }
+        
+        // Mark as processed using identifier
+        processedElements.insert(elementAttributes.identifier)
+        
         // Recursively process children
-        for child in elementAttributes.children {
+        let sortedChildren = elementAttributes.children.sorted { (e1, e2) -> Bool in
+            if abs(e1.y - e2.y) < 10 {
+                return e1.x < e2.x
+            }
+            return e1.y < e2.y
+        }
+        
+        for child in sortedChildren {
             processElement(child, indentLevel: indentLevel + 1)
         }
     }
-
-    // Get and sort root elements (those with depth 0)
+    
+    // Process root elements first (hierarchical)
     let rootElements = windowState.elements.values.filter { $0.depth == 0 }
     let sortedRootElements = rootElements.sorted { (e1, e2) -> Bool in
         if abs(e1.y - e2.y) < 10 {
@@ -671,17 +941,140 @@ func buildTextOutput(from windowState: WindowState) -> String {
         }
         return e1.y < e2.y
     }
-
+    
     for rootElement in sortedRootElements {
         processElement(rootElement, indentLevel: 0)
     }
-
+    
+    // Then process any orphaned elements
+    let orphanElements = windowState.elements.filter { !processedElements.contains($0.key) }
+    if !orphanElements.isEmpty {
+        textOutput += "\n--- ACCESSIBILITY_NOTIFICATIONS_PROCESSING ---\n"
+        
+        // Sort orphans by timestamp first (oldest first), then position if timestamps are equal
+        let sortedOrphans = orphanElements.values.sorted { (e1, e2) -> Bool in
+            if e1.timestamp == e2.timestamp {
+                if abs(e1.y - e2.y) < 10 {
+                    return e1.x < e2.x
+                }
+                return e1.y < e2.y
+            }
+            return e1.timestamp < e2.timestamp
+        }
+        
+        for element in sortedOrphans {
+            // One space per depth level
+            let indentStr = String(repeating: " ", count: element.depth)
+            let text = element.attributes.values
+                .filter { !seenTexts.contains($0) }
+                .map { 
+                    seenTexts.insert($0)
+                    return "[\($0)]"
+                }
+                .joined(separator: " ")
+            
+            if !text.isEmpty {
+                textOutput += "\(indentStr)\(text)\n"
+            }
+        }
+    }
+    
     return textOutput
 }
 
-func saveToDatabase(windowId: WindowIdentifier, textOutput: String, timestamp: String) {
+func saveToDatabase(windowId: WindowIdentifier, newTextOutput: String, timestamp: String) {
+    let startTime = DispatchTime.now()
     let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    let MAX_CHARS = 300_000
+    
+    // Sanitize window name by removing invisible characters
+    let sanitizedWindow = windowId.window
+        .components(separatedBy: CharacterSet.controlCharacters).joined()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let sanitizedApp = windowId.app
+        .components(separatedBy: CharacterSet.controlCharacters).joined()
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    
+    // First, get existing text_output
+    var existingText = ""
+    let selectSQL = "SELECT text_output FROM ui_monitoring WHERE app = ? AND window = ?;"
+    var selectStmt: OpaquePointer?
+    
+    if sqlite3_prepare_v2(db, selectSQL, -1, &selectStmt, nil) == SQLITE_OK {
+        sqlite3_bind_text(selectStmt, 1, sanitizedApp, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(selectStmt, 2, sanitizedWindow, -1, SQLITE_TRANSIENT)
+        
+        if sqlite3_step(selectStmt) == SQLITE_ROW {
+            if let text = sqlite3_column_text(selectStmt, 0) {
+                existingText = String(cString: text)
+            }
+        }
+        sqlite3_finalize(selectStmt)
+    }
+    
+    // Split and clean lines - only trim trailing whitespace, preserve leading
+    let existingLines = existingText.components(separatedBy: "\n")
+        .map { $0.trimmingCharacters(in: .whitespaces.subtracting(.init(charactersIn: " "))) }
+        .filter { !$0.isEmpty }
+    let newLines = newTextOutput.components(separatedBy: "\n")
+        .map { $0.trimmingCharacters(in: .whitespaces.subtracting(.init(charactersIn: " "))) }
+        .filter { !$0.isEmpty }
+    
+    var extensionsFound = 0
+    var exactMatchesFound = 0
+    var newCharsCount = 0
+    
+    let uniqueNewLines = newLines.filter { newLine in
+        let strippedNewLine = newLine.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .trimmingCharacters(in: .whitespaces)
+        return !existingLines.contains { existingLine in
+            let strippedExistingLine = existingLine.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                .trimmingCharacters(in: .whitespaces)
+            
+            if strippedExistingLine == strippedNewLine {
+                exactMatchesFound += 1
+                return true
+            }
+            
+            if strippedExistingLine.count < strippedNewLine.count && 
+               strippedNewLine.contains(strippedExistingLine) {
+                extensionsFound += 1
+                // Count additional characters in the extension
+                newCharsCount += (strippedNewLine.count - strippedExistingLine.count)
+                return true
+            }
+            
+            return false
+        }
+    }
+    
+    // Skip if no unique lines or extensions found
+    if uniqueNewLines.isEmpty && extensionsFound == 0 {
+        print("no new lines or extensions (found \(exactMatchesFound) exact matches)")
+        return
+    }
 
+    // Add characters from unique new lines
+    newCharsCount += uniqueNewLines.reduce(0) { $0 + $1.count }
+    
+    // Process only if we have unique lines
+    let allLines = existingLines + uniqueNewLines
+    
+    // Trim older lines if total length exceeds limit
+    var totalChars = 0
+    var startIndex = 0
+    
+    for (index, line) in allLines.enumerated().reversed() {
+        totalChars += line.count + 1 // +1 for newline
+        if totalChars > MAX_CHARS {
+            startIndex = index + 1
+            break
+        }
+    }
+    
+    let finalText = allLines[startIndex...].joined(separator: "\n")
+    
+    // Update database
     let upsertSQL = """
         INSERT INTO ui_monitoring (
             timestamp, app, window, text_output
@@ -690,54 +1083,53 @@ func saveToDatabase(windowId: WindowIdentifier, textOutput: String, timestamp: S
             timestamp = excluded.timestamp,
             text_output = excluded.text_output;
     """
-
-    var stmt: OpaquePointer?
-
-    if sqlite3_prepare_v2(db, upsertSQL, -1, &stmt, nil) == SQLITE_OK {
-        // Bind values
-        sqlite3_bind_text(stmt, 1, timestamp, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, windowId.app, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 3, windowId.window, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 4, textOutput, -1, SQLITE_TRANSIENT)
-
-        if sqlite3_step(stmt) != SQLITE_DONE {
+    
+    var upsertStmt: OpaquePointer?
+    if sqlite3_prepare_v2(db, upsertSQL, -1, &upsertStmt, nil) == SQLITE_OK {
+        sqlite3_bind_text(upsertStmt, 1, timestamp, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(upsertStmt, 2, sanitizedApp, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(upsertStmt, 3, sanitizedWindow, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(upsertStmt, 4, finalText, -1, SQLITE_TRANSIENT)
+        
+        if sqlite3_step(upsertStmt) != SQLITE_DONE {
             print("error updating row")
         }
-
-        sqlite3_finalize(stmt)
+        
+        sqlite3_finalize(upsertStmt)
     }
+
+    let endTime = DispatchTime.now()
+    let timeInterval = Double(endTime.uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000
+    print("\(String(format: "%.2f", timeInterval))ms - saved to db for \(windowId.app)/\(String(windowId.window.prefix(30)))... (\(uniqueNewLines.count) new lines, \(extensionsFound) extensions, \(newCharsCount) new chars), skipped \(exactMatchesFound) exact matches")
 }
 
 func saveElementValues() {
     if !hasChanges || changedWindows.isEmpty { return }
-
-    let startTime = DispatchTime.now()
+    
     let timestamp = ISO8601DateFormatter().string(from: Date())
-
+    var totalChars = 0
+    
     sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
-
+    
     for windowId in changedWindows {
         guard let windowState = globalElementValues[windowId.app]?[windowId.window] else { continue }
-
+        
         // Build text output
         let textOutput = buildTextOutput(from: windowState)
-
+        totalChars += textOutput.count
+        
         // Store the formatted text output in the window state
         globalElementValues[windowId.app]?[windowId.window]?.textOutput = textOutput
-
+        
         // Save to database
-        saveToDatabase(windowId: windowId, textOutput: textOutput, timestamp: timestamp)
+        saveToDatabase(windowId: windowId, newTextOutput: textOutput, timestamp: timestamp)
     }
-
+    
     sqlite3_exec(db, "COMMIT", nil, nil, nil)
-
+    
     // Clear the changed windows set
     changedWindows.removeAll()
     hasChanges = false
-
-    let endTime = DispatchTime.now()
-    let timeInterval = Double(endTime.uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000
-    print("\(String(format: "%.2f", timeInterval))ms - saved to db")
 }
 
 // Add proper cleanup on exit
@@ -768,6 +1160,54 @@ func cleanup() {
     currentContext = nil
 }
 
+func pruneGlobalState() {
+    let MAX_SIZE_MB = 10.0
+    let MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024 / 2  // Divide by 2 since String uses 2 bytes per char
+    
+    var totalSize = 0
+    var elementsByTimestamp: [(app: String, window: String, timestamp: Date, size: Int)] = []
+    
+    // Calculate sizes and collect timestamps
+    for (app, windows) in globalElementValues {
+        for (window, windowState) in windows {
+            var windowSize = 0
+            for element in windowState.elements.values {
+                windowSize += element.attributes.values.reduce(0) { $0 + $1.count }
+            }
+            totalSize += windowSize
+            elementsByTimestamp.append((app, window, windowState.timestamp, windowSize))
+        }
+    }
+    
+    // If we're under the limit, no need to prune
+    if Double(totalSize) <= MAX_SIZE_BYTES {
+        return
+    }
+    
+    print("pruning global state: current size \(String(format: "%.2f", Double(totalSize) * 2 / 1024 / 1024))mb")
+    
+    // Sort by timestamp (oldest first)
+    elementsByTimestamp.sort { $0.timestamp < $1.timestamp }
+    
+    // Remove oldest entries until we're under the limit
+    var removedSize = 0
+    for entry in elementsByTimestamp {
+        if Double(totalSize - removedSize) <= MAX_SIZE_BYTES {
+            break
+        }
+        
+        globalElementValues[entry.app]?[entry.window] = nil
+        if globalElementValues[entry.app]?.isEmpty == true {
+            globalElementValues.removeValue(forKey: entry.app)
+        }
+        
+        removedSize += entry.size
+        print("pruned \(entry.app)/\(entry.window): \(String(format: "%.2f", Double(entry.size) * 2 / 1024))kb")
+    }
+    
+    print("pruned global state to \(String(format: "%.2f", Double(totalSize - removedSize) * 2 / 1024 / 1024))mb")
+}
+
 func measureGlobalElementValuesSize() {
     var totalElements = 0
     var totalAttributes = 0
@@ -777,54 +1217,58 @@ func measureGlobalElementValuesSize() {
         for (_, windowState) in windows {
             totalElements += windowState.elements.count
             totalAttributes += windowState.elements.values.reduce(0) { $0 + $1.attributes.count }
-            // Sum up the length of all attribute values
             totalStringLength += windowState.elements.values.reduce(0) { $0 + $1.attributes.values.reduce(0) { $0 + $1.count } }
         }
     }
 
-    let mbSize = String(format: "%.3f", Double(totalStringLength) * 2 / 1024.0 / 1024.0)
-    print("global state size: \(mbSize)mb")
+    let mbSize = Double(totalStringLength) * 2 / 1024.0 / 1024.0
+    print("global state size: \(String(format: "%.3f", mbSize))mb")
+    
+    // Add pruning check
+    if mbSize > 10.0 {
+        pruneGlobalState()
+    }
 }
 
 public class UIMonitor {
     private static var shared: UIMonitor?
     private var isRunning = false
-
+    
     public static func getInstance() -> UIMonitor {
         if shared == nil {
             shared = UIMonitor()
         }
         return shared!
     }
-
+    
     // Start monitoring in background
     public func start() {
         if isRunning { return }
         isRunning = true
-
+        
         DispatchQueue.global(qos: .background).async {
             startMonitoring()
         }
     }
-
+    
     // Stop monitoring
     public func stop() {
         if !isRunning { return }
         cleanup()
         isRunning = false
     }
-
+    
     // Get current text output for specific app/window
     public func getCurrentOutput(app: String, window: String? = nil) -> String? {
         let appName = app.lowercased()
-
+        
         if let windowName = window?.lowercased() {
             if let windowState = globalElementValues[appName]?[windowName] {
                 return buildTextOutput(from: windowState)
             }
             return nil
         }
-
+        
         // If no window specified, return all windows' output concatenated
         var outputs: [String] = []
         if let windows = globalElementValues[appName] {
@@ -835,12 +1279,12 @@ public class UIMonitor {
         }
         return outputs.isEmpty ? nil : outputs.joined(separator: "\n---\n")
     }
-
+    
     // Get all current apps being monitored
     public func getMonitoredApps() -> [String] {
         return Array(globalElementValues.keys)
     }
-
+    
     // Get all windows for a specific app
     public func getWindowsForApp(_ app: String) -> [String] {
         return globalElementValues[app.lowercased()]?.keys.map { $0 } ?? []
