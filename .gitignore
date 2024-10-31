@@ -39,8 +39,5 @@ pnpm-lock.yaml
 # Ignore onnxruntime-win-x64-gpu libraries
 onnxruntime-win-x64-gpu*/
 
-# ignore environment variables
-.env
-
 # ignore historical versions for WIP
 screenpipe-vision/src/ui_monitoring_past_versions/
