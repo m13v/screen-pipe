@@ -24,8 +24,10 @@ const mkdirp = async (dir) => await fs.mkdir(dir, { recursive: true });
 const config = {
 	ffmpegRealname: 'ffmpeg',
 	windows: {
-		ffmpegName: 'ffmpeg-7.0.2-full_build-shared',
-		ffmpegUrl: 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-7.0.2-full_build-shared.7z',
+		ffmpegName: 'ffmpeg-7.0-windows-desktop-vs2022-default',
+		ffmpegUrl: 'https://unlimited.dl.sourceforge.net/project/avbuild/windows-desktop/ffmpeg-7.0-windows-desktop-vs2022-default.7z?viasf=1',
+
+
 		vcpkgPackages: ['opencl', 'onnxruntime-gpu'],
 	},
 	linux: {
@@ -317,6 +319,7 @@ if (platform == 'windows') {
 		await $`'C:\\Program Files\\7-Zip\\7z.exe' x ${config.windows.ffmpegName}.7z`
 		await $`mv ${config.windows.ffmpegName} ${config.ffmpegRealname}`
 		await $`rm -rf ${config.windows.ffmpegName}.7z`
+		await $`mv ${config.ffmpegRealname}/lib/x64/* ${config.ffmpegRealname}/lib/`
 	}
 
 	// Setup ONNX Runtime
@@ -525,21 +528,30 @@ if (platform == 'macos') {
 	// Setup FFMPEG
 	if (!(await fs.exists(config.ffmpegRealname))) {
 		await $`wget --no-config -nc ${config.macos.ffmpegUrl} -O ${config.macos.ffmpegName}.tar.xz`
-		await $`tar xf ${config.macos.ffmpegName}.tar.xz`
+		await $`tar xf ${config.macos.ffmpegName}.tar.xz -C .`
 		await $`mv ${config.macos.ffmpegName} ${config.ffmpegRealname}`
 		await $`rm ${config.macos.ffmpegName}.tar.xz`
 	} else {
 		console.log('FFMPEG already exists');
 	}
 
-	// Move and rename ffmpeg and ffprobe binaries
+	// Move and rename ffmpeg binary
 	const ffmpegSrc = path.join(cwd, config.ffmpegRealname, 'bin', 'ffmpeg');
 
-	// For x86_64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-x86_64-apple-darwin'));
+	try {
+		// For x86_64
+		await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-x86_64-apple-darwin'));
 
-	// For arm64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-aarch64-apple-darwin'));
+		// For arm64
+		await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-aarch64-apple-darwin'));
+
+		console.log('Moved and renamed ffmpeg binaries successfully');
+	} catch (error) {
+		console.error('Error copying ffmpeg binaries:', error);
+		// Optionally add more detailed error information
+		console.error('Source path:', ffmpegSrc);
+		console.error('Does source exist?', await fs.exists(ffmpegSrc));
+	}
 
 	console.log('Moved and renamed ffmpeg binary for externalBin');
 }
