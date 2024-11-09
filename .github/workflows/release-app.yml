@@ -42,6 +42,7 @@ jobs:
       - name: Generate Changelog
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CN_API_KEY: ${{ secrets.CN_API_KEY }}
         run: .github/scripts/generate_changelog_md.sh ${{ env.VERSION }} ${{ github.event.inputs.commit_hash }}
 
       - name: Commit and push changelog files
@@ -234,11 +235,11 @@ jobs:
 
       - name: Build CLI
         shell: bash
-        # TODO: too slow
-        # env:
-        #   CARGO_PROFILE_RELEASE_LTO: "true"
-        #   CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
-        #   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+        env:
+          # Windows specific optimizations (only applied when building for Windows)
+          CARGO_PROFILE_RELEASE_STRIP: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'symbols' || 'none' }}
+          CARGO_PROFILE_RELEASE_PANIC: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'abort' || 'unwind' }}
+          CARGO_PROFILE_RELEASE_INCREMENTAL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'false' || 'true' }}
         run: |
           if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
             export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
@@ -308,11 +309,11 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && '2' || matrix.platform == 'ubuntu-22.04' && 'z' || '3' }}
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && '16' || matrix.platform == 'ubuntu-22.04' && '1' || '16' }}
           # Enable incremental compilation for Windows
-          CARGO_INCREMENTAL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && '1' || '0' }}
+          CARGO_INCREMENTAL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'true' || 'false' }}
           # Windows specific optimizations (only applied when building for Windows)
-          CARGO_PROFILE_RELEASE_STRIP: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'symbols' || '' }}
-          CARGO_PROFILE_RELEASE_PANIC: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'abort' || '' }}
-          CARGO_PROFILE_RELEASE_INCREMENTAL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'false' || '' }}
+          CARGO_PROFILE_RELEASE_STRIP: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'symbols' || 'none' }}
+          CARGO_PROFILE_RELEASE_PANIC: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'abort' || 'unwind' }}
+          CARGO_PROFILE_RELEASE_INCREMENTAL: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && 'false' || 'true' }}
           RUSTFLAGS: ${{ matrix.args == '--target x86_64-pc-windows-msvc' && '-C target-feature=+crt-static -C link-arg=/LTCG' || '' }}
         with:
           args: ${{ matrix.tauri-args }}

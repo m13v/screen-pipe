@@ -317,6 +317,7 @@ if (platform == 'windows') {
 		await $`'C:\\Program Files\\7-Zip\\7z.exe' x ${config.windows.ffmpegName}.7z`
 		await $`mv ${config.windows.ffmpegName} ${config.ffmpegRealname}`
 		await $`rm -rf ${config.windows.ffmpegName}.7z`
+		// await $`mv ${config.ffmpegRealname}/lib/x64/* ${config.ffmpegRealname}/lib/`
 	}
 
 	// Setup ONNX Runtime
@@ -349,6 +350,7 @@ if (platform == 'windows') {
 		'ffmpeg/doc',
 		'ffmpeg/presets',
 		'ffmpeg/licenses',
+		'ffmpeg/include',
 		path.join(onnxRuntimeName, 'docs'),
 		path.join(onnxRuntimeName, 'examples'),
 		path.join(onnxRuntimeName, 'LICENSE'),
@@ -447,8 +449,8 @@ if (platform == 'macos') {
 
 			try {
 				if (await fs.exists('screenpipe-aarch64-apple-darwin')) {
-					// Get existing rpaths
-					const otoolOutput = await $`otool -l ./screenpipe-aarch64-apple-darwin`.catch(() => ({ stdout: '' }));
+					// Get existing rpaths but suppress detailed output
+					const otoolOutput = await $`otool -l ./screenpipe-aarch64-apple-darwin`.quiet();
 					const rpathRegex = /LC_RPATH.*?\n.*?path\s+(.*?)\s/gs;
 					const existingRpaths = [];
 					let match;
@@ -458,13 +460,9 @@ if (platform == 'macos') {
 						existingRpaths.push(match[1]);
 					}
 
-					console.log('existing rpaths:', existingRpaths);
-
-					// Remove existing rpaths
+					// Remove existing rpaths silently
 					for (const rpath of existingRpaths) {
-						await $`install_name_tool -delete_rpath "${rpath}" ./screenpipe-aarch64-apple-darwin`.catch(() => {
-							console.log(`note: couldn't delete rpath ${rpath}`);
-						});
+						await $`install_name_tool -delete_rpath "${rpath}" ./screenpipe-aarch64-apple-darwin`.quiet();
 					}
 
 					// Add the rpaths we need
@@ -477,9 +475,7 @@ if (platform == 'macos') {
 					];
 
 					for (const rpath of rpathsToAdd) {
-						await $`install_name_tool -add_rpath "${rpath}" ./screenpipe-aarch64-apple-darwin`.catch(() => {
-							console.log(`note: couldn't add rpath ${rpath}`);
-						});
+						await $`install_name_tool -add_rpath "${rpath}" ./screenpipe-aarch64-apple-darwin`.quiet();
 					}
 
 					// Update the dylib reference
@@ -497,9 +493,9 @@ if (platform == 'macos') {
 						console.error(`${dylib} not found at ${dyLibSrc}`);
 					}
 
-					console.log('verifying final configuration:');
-					await $`otool -L ./screenpipe-aarch64-apple-darwin`;
-					await $`otool -l ./screenpipe-aarch64-apple-darwin | grep -A2 LC_RPATH`;
+					// console.log('verifying final configuration:');
+					// await $`otool -L ./screenpipe-aarch64-apple-darwin`;
+					// await $`otool -l ./screenpipe-aarch64-apple-darwin | grep -A2 LC_RPATH`;
 				}
 			} catch (error) {
 				console.error('error updating dylib paths:', error);
@@ -627,6 +623,8 @@ async function installOllamaSidecar() {
 		&& await fs.exists(path.join(ollamaDir, "ollama-x86_64-apple-darwin"))) ||
 		(platform !== 'macos' && await fs.exists(path.join(ollamaDir, ollamaExe)))) {
 		console.log('ollama sidecar already exists. skipping installation.');
+
+
 		return;
 	}
 
@@ -685,7 +683,14 @@ async function installOllamaSidecar() {
 				'ggml_cuda_v11.dll',
 				'rocblas',
 				'rocblas.dll',
-				'ggml_rocm.dll'
+				'ggml_rocm.dll',
+				'runners/rocm_v6.1',
+
+				// just delete cuda files bcs build broken - Nvidia users will have to just their own ollama
+				'cublas64_12.dll',
+				'cublasLt64_12.dll',
+				'cudart64_120.dll',
+				'ggml_cuda_v12.dll',
 			];
 
 			for (const lib of oldLibs) {
