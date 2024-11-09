@@ -1,9 +1,16 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
-import { Command } from "cmdk";
 import { Input } from "@/components/ui/input";
 import { Loader2, Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  Command,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+} from "@/components/ui/command";
 
 interface SqlAutocompleteInputProps {
   id: string;
@@ -106,10 +113,10 @@ export function SqlAutocompleteInput({
           )}
         </div>
         {open && (
-          <Command.List className="absolute z-20 w-full bg-white border border-gray-300 rounded-md mt-1 max-h-60 overflow-auto shadow-lg text-sm">
+          <CommandList className="absolute z-20 w-full bg-white border border-gray-300 rounded-md mt-1 max-h-60 overflow-auto shadow-lg text-sm">
             <div className="flex items-center px-3 py-2 border-b border-gray-200">
               <Search className="mr-2 h-4 w-4 text-gray-400" />
-              <Command.Input
+              <CommandInput
                 placeholder="search..."
                 value={inputValue}
                 onValueChange={setInputValue}
@@ -117,32 +124,34 @@ export function SqlAutocompleteInput({
               />
             </div>
             {isLoading ? (
-              <Command.Loading>
+              <CommandEmpty>
                 <div className="px-4 py-2 text-gray-500 flex items-center">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   loading...
                 </div>
-              </Command.Loading>
+              </CommandEmpty>
             ) : (
               items
                 .filter((item) =>
                   item.name.toLowerCase().includes(inputValue.toLowerCase())
                 )
                 .map((item: any) => (
-                  <Command.Item
+                  <CommandItem
                     key={item.name}
                     value={item.name}
                     onSelect={handleSelect}
-                    className="px-4 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-200 last:border-b-0"
+                    className="px-4 py-2 hover:bg-gray-100 cursor-pointer border-b border-gray-200 last:border-b-0 aria-disabled:opacity-50"
                   >
                     {item.name} ({item.count})
-                  </Command.Item>
+                  </CommandItem>
                 ))
             )}
             {!isLoading && items.length === 0 && (
-              <div className="px-4 py-2 text-gray-500">no results found</div>
+              <CommandEmpty>
+                <div className="px-4 py-2 text-gray-500">no results found</div>
+              </CommandEmpty>
             )}
-          </Command.List>
+          </CommandList>
         )}
       </Command>
     </div>
