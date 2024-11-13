@@ -46,8 +46,8 @@ const config = {
 		],
 	},
 	macos: {
-		ffmpegName: 'ffmpeg-7.1',
-		ffmpegUrl: 'https://evermeet.cx/ffmpeg/ffmpeg-7.1.7z',
+		ffmpegName: 'ffmpeg-7.0-macOS-default',
+		ffmpegUrl: 'https://master.dl.sourceforge.net/project/avbuild/macOS/ffmpeg-7.0-macOS-default.tar.xz?viasf=1',
 	},
 }
 
@@ -440,26 +440,26 @@ if (platform == 'macos') {
 	}
 
 
-	// Setup FFMPEG
-	if (!(await fs.exists(config.ffmpegRealname))) {
-		await $`wget --no-config -nc ${config.macos.ffmpegUrl} -O ${config.macos.ffmpegName}.7z`
-		await $`7z e ${config.macos.ffmpegName}.7z -o ./${config.macos.ffmpegName}`
-		await $`mv ${config.macos.ffmpegName} ${config.ffmpegRealname}`
-		await $`rm ${config.macos.ffmpegName}.7z`
-	} else {
-		console.log('FFMPEG already exists');
-	}
+	// // Setup FFMPEG
+	// if (!(await fs.exists(config.ffmpegRealname))) {
+	// 	await $`wget --no-config -nc ${config.macos.ffmpegUrl} -O ${config.macos.ffmpegName}.tar.xz`
+	// 	await $`tar xf ${config.macos.ffmpegName}.tar.xz`
+	// 	await $`mv ${config.macos.ffmpegName} ${config.ffmpegRealname}`
+	// 	await $`rm ${config.macos.ffmpegName}.tar.xz`
+	// } else {
+	// 	console.log('FFMPEG already exists');
+	// }
 
-	// Move and rename ffmpeg and ffprobe binaries
-	const ffmpegSrc = path.join(cwd, config.ffmpegRealname, 'bin', 'ffmpeg');
+	// // Move and rename ffmpeg and ffprobe binaries
+	// const ffmpegSrc = path.join(cwd, config.ffmpegRealname, 'bin', 'ffmpeg');
 
-	// For x86_64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-x86_64-apple-darwin'));
+	// // For x86_64
+	// await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-x86_64-apple-darwin'));
 
-	// For arm64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-aarch64-apple-darwin'));
+	// // For arm64
+	// await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-aarch64-apple-darwin'));
 
-	console.log('Moved and renamed ffmpeg binary for externalBin');
+	// console.log('Moved and renamed ffmpeg binary for externalBin');
 
 	// Setup Swift UI monitoring
 	console.log('Setting up Swift UI monitoring...');

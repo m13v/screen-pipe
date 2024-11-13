@@ -11,7 +11,8 @@ English | [简体中文](README-zh_CN.md) | [日本語](README-ja_JP.md)
 <!-- ScreenPipe Title and Subtitle -->
 <p align="center" style="font-family: 'Press Start 2P', monospace;">
    <h1 align="center">[ screenpipe ]</h1>
-   <p align="center">rewind.ai x cursor.com = your AI assistant that has all the context.</p>
+   <p align="center">rewind.ai x cursor.com = your AI assistant that has all the context. </p>
+   <p align="center">24/7 screen & voice recording for the age of super intelligence. get your data ready or be left behind</p>
 </p>
 
 <!-- Slogan -->
@@ -74,7 +75,7 @@ English | [简体中文](README-zh_CN.md) | [日本語](README-ja_JP.md)
 
 ---
 
-# open source 24/7 screen & voice recording for the age of superintelligence
+# how it works?
 
 we are shipping daily, make suggestions, post bugs, [give feedback](mailto:louis@screenpi.pe?subject=Screenpipe%20Feedback&body=I'd%20like%20to%20use%20Screenpipe%20for%20...%0D%0A%0D%0AI%20cannot%20because%20of%20...%0D%0A%0D%0AWe%20can%20also%20have%20a%20call,%20book%20at%20https://cal.com/louis030195/screenpipe).
 
@@ -98,11 +99,11 @@ there are multiple ways to install screenpipe:
 
 [**👉 install screenpipe now**](https://docs.screenpi.pe/docs/getting-started)
 
-## usage
+## create plugins
 
 screenpipe has a plugin system called "pipe" which lets you run code in a sandboxed environment within the Rust code, [get started](https://docs.screenpi.pe/docs/plugins)
 
-## examples
+## other examples
 
 [check examples](https://docs.screenpi.pe/docs/examples)
 
