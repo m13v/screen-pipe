@@ -46,5 +46,4 @@ onnxruntime-win-x64-gpu*/
 node_modules/
 
 screenpipe-vision/bin/ui_monitor-*
-screenpipe-vision/bin/*
 screenpipe-vision/src/ui_monitoring_past_versions/
