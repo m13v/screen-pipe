@@ -1,0 +1,22 @@
+{
+  "fields": [
+    {
+      "name": "authtoken",
+      "type": "string",
+      "default": "",
+      "description": "your ngrok authtoken from https://dashboard.ngrok.com/get-started/your-authtoken"
+    },
+    {
+      "name": "domain",
+      "type": "string",
+      "default": "",
+      "description": "optional: your custom domain if you have one"
+    },
+    {
+      "name": "port",
+      "type": "number",
+      "default": 3030,
+      "description": "port to expose (default is screenpipe's api port)"
+    }
+  ]
+}
