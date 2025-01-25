@@ -168,7 +168,7 @@ export function HarvestClosestConnections() {
             const message = data.connectionsSent >= 35
               ? <span className="flex items-center gap-2">
                   <Clock className="h-4 w-4 text-gray-500" />
-                  <span>daily limit reached, next harvest at</span>
+                  <span>daily limit of {data.connectionsSent} connections reached</span>
                   <span className="font-medium">{formattedTime}</span>
                 </span>
               : <span className="flex items-center gap-2">
@@ -233,7 +233,7 @@ export function HarvestClosestConnections() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch("/api/harvest/stats");
+        const res = await fetch("/api/harvest/stats");  // Changed from /api/harvest/stats
         if (!res.ok) return;
         const data = await res.json();
         
@@ -270,8 +270,10 @@ export function HarvestClosestConnections() {
         }
       } catch (error) {
         console.error("failed to fetch status:", error);
+        console.error("failed to fetch status:", error);
       }
     }, 2000);
+  
   
     return () => clearInterval(interval);
   }, []);
