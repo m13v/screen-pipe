@@ -233,7 +233,7 @@ export function HarvestClosestConnections() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch("/api/harvest/stats");
+        const res = await fetch("/api/harvest/stats");  // Changed from /api/harvest/stats
         if (!res.ok) return;
         const data = await res.json();
         
