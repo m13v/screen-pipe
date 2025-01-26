@@ -47,6 +47,43 @@ function getScreenDimensions(requestDims?: ScreenDimensions) {
     return defaultDims;
 }
 
+async function isChromeTrulyRunning(): Promise<boolean> {
+  try {
+    logger.log('checking if chrome is truly running...');
+    
+    // First check if the debug port responds
+    logger.log('checking debug port 9222...');
+    const response = await fetch('http://127.0.0.1:9222/json/version');
+    if (!response.ok) {
+      logger.log('debug port check failed - port not responding');
+      return false;
+    }
+    
+    const data = await response.json();
+    logger.log(`debug port response: ${JSON.stringify(data, null, 2)}`);
+    
+    // Then verify Chrome process actually exists
+    const platform = os.platform();
+    const checkCommand = platform === "win32"
+      ? `tasklist /FI "IMAGENAME eq chrome.exe" /FO CSV /NH`
+      : `pgrep -f "Google Chrome"`;
+      
+    logger.log(`checking chrome process with command: ${checkCommand}`);
+    const { stdout } = await execPromise(checkCommand);
+    
+    const processExists = stdout.length > 0;
+    logger.log(`chrome process check result: ${processExists ? 'found' : 'not found'}`);
+    if (processExists) {
+      logger.log(`process info: ${stdout.trim()}`);
+    }
+    
+    return processExists;
+  } catch (error) {
+    logger.error(`chrome process check failed with error: ${error}`);
+    return false;
+  }
+}
+
 export async function POST(request: Request) {
   try {
     logger.log('starting POST request');
@@ -81,18 +118,23 @@ export async function POST(request: Request) {
 
     logger.log("checking for existing chrome instance...");
     let wsUrl: string | null = null;
-    try {
-      const response = await fetch('http://127.0.0.1:9222/json/version');
-      if (response.ok) {
-        const data = await response.json() as { webSocketDebuggerUrl: string };
-        wsUrl = data.webSocketDebuggerUrl.replace('ws://localhost:', 'ws://127.0.0.1:');
-        logger.log(`found existing chrome instance at ${wsUrl}`);
-      } else {
-        logger.log('no existing chrome instance found, launching a new one');
+
+    const chromeTrulyRunning = await isChromeTrulyRunning();
+    if (!chromeTrulyRunning) {
+      logger.log('chrome process not found or debug port stale, killing and relaunching');
+      await quitChrome();
+      await quitBrowser(logger);
+    } else {
+      try {
+        const response = await fetch('http://127.0.0.1:9222/json/version');
+        if (response.ok) {
+          const data = await response.json() as { webSocketDebuggerUrl: string };
+          wsUrl = data.webSocketDebuggerUrl.replace('ws://localhost:', 'ws://127.0.0.1:');
+          logger.log(`found existing chrome instance at ${wsUrl}`);
+        }
+      } catch (error) {
+        logger.error(`error checking debug port: ${error}`);
       }
-    } catch (error) {
-      logger.error(`error checking for existing chrome instance: ${error}`);
-      logger.log('launching a new chrome instance');
     }
 
     if (!wsUrl) {
