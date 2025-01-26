@@ -9,14 +9,20 @@ const defaultLogger = new RouteLogger('browser-setup');
 // Export this function so it can be used elsewhere if needed
 export async function getDebuggerUrl(logger: RouteLogger = defaultLogger): Promise<string> {
     logger.log('attempting to get debugger url...');
-    const response = await fetch('http://127.0.0.1:9222/json/version');
-    if (!response.ok) {
-        logger.error(`failed to get debugger url: ${response.status} ${response.statusText}`);
-        throw new Error('failed to get fresh websocket url');
+    try {
+        const response = await fetch('http://127.0.0.1:9222/json/version');
+        if (!response.ok) {
+            logger.error(`failed to get debugger url: ${response.status} ${response.statusText}`);
+            throw new Error('failed to get fresh websocket url');
+        }
+        const data = await response.json() as { webSocketDebuggerUrl: string };
+        const wsUrl = data.webSocketDebuggerUrl.replace('ws://localhost:', 'ws://127.0.0.1:');
+        logger.log('got debugger url: ' + wsUrl);
+        return wsUrl;
+    } catch (error) {
+        logger.error(`failed to fetch debugger url: ${error}`);
+        throw error;
     }
-    const data = await response.json() as { webSocketDebuggerUrl: string };
-    logger.log('got debugger url: ' + data.webSocketDebuggerUrl);
-    return data.webSocketDebuggerUrl.replace('ws://localhost:', 'ws://127.0.0.1:');
 }
 
 // we rely on an existing or newly launched chrome instance
@@ -24,7 +30,15 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
     logger.log('checking for existing browser...');
     if (!activeBrowser) {
         const session = ChromeSession.getInstance();
-        const wsUrl = session.getWsUrl() || await getDebuggerUrl(logger);
+        let wsUrl: string;
+        
+        try {
+            wsUrl = session.getWsUrl() || await getDebuggerUrl(logger);
+            logger.log(`attempting to connect using ws url: ${wsUrl}`);
+        } catch (error) {
+            logger.error(`failed to get ws url: ${error}`);
+            throw error;
+        }
 
         let retries = 5;
         let lastError;
@@ -32,7 +46,7 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
         while (retries > 0) {
             try {
                 logger.log(`connection attempt ${6 - retries}...`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 2000)); // increased delay
 
                 activeBrowser = await puppeteer.connect({
                     browserWSEndpoint: wsUrl,
@@ -41,7 +55,7 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
                 session.setActiveBrowser(activeBrowser);
                 logger.log('browser connected successfully');
 
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 2000)); // increased delay
                 let pages = await activeBrowser.pages();
                 logger.log(`found ${pages.length} pages`);
 
@@ -73,7 +87,16 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
                 lastError = error;
                 logger.error(`connection attempt ${6 - retries} failed: ${error}`);
                 retries--;
+                
                 if (retries > 0) {
+                    // Try to get a fresh ws url on retry
+                    try {
+                        wsUrl = await getDebuggerUrl(logger);
+                        logger.log(`got fresh ws url for retry: ${wsUrl}`);
+                    } catch (wsError) {
+                        logger.error(`failed to get fresh ws url: ${wsError}`);
+                    }
+                    
                     logger.log(`retrying in 2s... (${retries} attempts left)`);
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
