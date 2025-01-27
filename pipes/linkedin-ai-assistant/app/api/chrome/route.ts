@@ -53,7 +53,11 @@ async function isChromeTrulyRunning(): Promise<boolean> {
     
     // First check if the debug port responds
     logger.log('checking debug port 9222...');
-    const response = await fetch('http://127.0.0.1:9222/json/version');
+    const response = await fetch('http://127.0.0.1:9222/json/version', {
+      // Add timeout to prevent hanging
+      signal: AbortSignal.timeout(5000)
+    });
+    
     if (!response.ok) {
       logger.log('debug port check failed - port not responding');
       return false;
@@ -61,6 +65,12 @@ async function isChromeTrulyRunning(): Promise<boolean> {
     
     const data = await response.json();
     logger.log(`debug port response: ${JSON.stringify(data, null, 2)}`);
+    
+    // Verify we got a valid websocket URL
+    if (!data.webSocketDebuggerUrl) {
+      logger.log('debug port response missing websocket URL');
+      return false;
+    }
     
     // Then verify Chrome process actually exists
     const platform = os.platform();
@@ -77,7 +87,8 @@ async function isChromeTrulyRunning(): Promise<boolean> {
       logger.log(`process info: ${stdout.trim()}`);
     }
     
-    return processExists;
+    // Only return true if both checks pass
+    return processExists && !!data.webSocketDebuggerUrl;
   } catch (error) {
     logger.error(`chrome process check failed with error: ${error}`);
     return false;
