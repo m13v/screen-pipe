@@ -48,7 +48,7 @@ export async function startWithdrawing(): Promise<void> {
 
     // Browser setup
     updateWorkflowStep('browser', 'running', 'connecting to chrome');
-    const statusResponse = await fetch(`${BASE_URL}/api/chrome/status`);
+    const statusResponse = await fetch(`${BASE_URL}/api/chrome?action=status`);
     const statusData = await statusResponse.json();
 
     if (statusData.status !== 'connected' || !statusData.wsUrl) {

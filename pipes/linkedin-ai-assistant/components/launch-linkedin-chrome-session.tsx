@@ -121,7 +121,7 @@ export function LaunchLinkedInChromeSession({ loginStatus, setLoginStatus }: Pro
     while (attempts < maxAttempts) {
       try {
         logger.log('polling debugger status...');
-        const response = await fetch('/api/chrome/status');
+        const response = await fetch('/api/chrome?action=status');
         const data = await response.json();
         
         if (data.logs) {
@@ -149,11 +149,7 @@ export function LaunchLinkedInChromeSession({ loginStatus, setLoginStatus }: Pro
 
   const checkLoginStatus = async (wsUrl: string) => {
     try {
-      const response = await fetch('/api/chrome/check-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wsUrl }),
-      });
+      const response = await fetch('/api/chrome?action=check-login');
       
       if (!response.ok) throw new Error('Failed to check login status');
       const data = await response.json();
@@ -184,19 +180,18 @@ export function LaunchLinkedInChromeSession({ loginStatus, setLoginStatus }: Pro
 
   const navigateToLinkedIn = async () => {
     try {
-      const statusResponse = await fetch('/api/chrome/status');
+      const statusResponse = await fetch('/api/chrome?action=status');
       const statusData = await statusResponse.json();
       
       if (statusData.status !== 'connected' || !statusData.wsUrl) {
         throw new Error('chrome not connected');
       }
 
-      const response = await fetch('/api/chrome/navigate', {
+      const response = await fetch('/api/chrome', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          url: 'https://www.linkedin.com',
-          wsUrl: statusData.wsUrl 
+          url: 'https://www.linkedin.com'
         }),
       });
 

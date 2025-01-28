@@ -69,20 +69,29 @@ export default function TemplateEditor({ initialTemplate, defaultOpen = true }: 
       setValidationError(null);
       console.log('starting search validation...');
       
-      // First check Chrome status
-      let statusRes = await fetch('/api/chrome/status');
+      // Updated to use new combined endpoint
+      let statusRes = await fetch('/api/chrome?action=status');
       let { wsUrl, status } = await statusRes.json();
       console.log('initial chrome status:', status, 'wsUrl:', wsUrl);
       
       // If not connected, launch Chrome and wait for connection
       if (status !== 'connected') {
         console.log('chrome not connected, launching...');
-        await fetch('/api/chrome', { method: 'POST' });
+        await fetch('/api/chrome', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            screenDims: {
+              width: window.screen.availWidth,
+              height: window.screen.availHeight
+            }
+          })
+        });
         
         // Poll for connection status
         for (let i = 0; i < 10; i++) {
           await new Promise(resolve => setTimeout(resolve, 1000));
-          statusRes = await fetch('/api/chrome/status');
+          statusRes = await fetch('/api/chrome?action=status');
           const newStatus = await statusRes.json();
           console.log('checking chrome status:', newStatus);
           
@@ -105,7 +114,7 @@ export default function TemplateEditor({ initialTemplate, defaultOpen = true }: 
         body: JSON.stringify({ 
           url, 
           wsUrl,
-          allowTruncate: searchResults === 100 // true if we've clicked the truncate button
+          allowTruncate: searchResults === 100
         })
       });
 

@@ -46,8 +46,10 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
         while (retries > 0) {
             try {
                 logger.log(`connection attempt ${6 - retries}...`);
-                await new Promise(resolve => setTimeout(resolve, 2000)); // increased delay
+                logger.log('waiting 2s before connection attempt...');
+                await new Promise(resolve => setTimeout(resolve, 2000));
 
+                logger.log('connecting to browser...');
                 activeBrowser = await puppeteer.connect({
                     browserWSEndpoint: wsUrl,
                     defaultViewport: null,
@@ -55,42 +57,54 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
                 session.setActiveBrowser(activeBrowser);
                 logger.log('browser connected successfully');
 
-                await new Promise(resolve => setTimeout(resolve, 2000)); // increased delay
+                logger.log('waiting 2s before getting pages...');
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                logger.log('getting browser pages...');
                 let pages = await activeBrowser.pages();
                 logger.log(`found ${pages.length} pages`);
 
                 // Find LinkedIn page or create new one without closing others
+                logger.log('searching for linkedin or blank page...');
                 let linkedinPage = pages.find(page => {
                     const url = page.url();
+                    logger.log(`checking page url: ${url}`);
                     return url.startsWith('https://www.linkedin.com') || url === 'about:blank';
                 });
 
                 if (linkedinPage) {
                     logger.log('found existing linkedin or blank page, reusing it');
                     activePage = linkedinPage;
-                    // If it's a blank page, we don't need to do anything special
                     if (linkedinPage.url() === 'about:blank') {
                         logger.log('using blank page for linkedin');
                     }
+                    logger.log('bringing page to front...');
                     await activePage.bringToFront();
                     logger.log('brought linkedin page to front');
                 } else {
                     logger.log('creating new tab for linkedin');
                     activePage = await activeBrowser.newPage();
+                    logger.log('new page created');
+                    logger.log('bringing page to front...');
                     await activePage.bringToFront();
                     logger.log('new tab created and brought to front');
                 }
+                
+                logger.log('setting active page in session...');
                 session.setActivePage(activePage);
                 logger.log('browser setup complete');
                 break;
             } catch (error) {
                 lastError = error;
-                logger.error(`connection attempt ${6 - retries} failed: ${error}`);
+                logger.error(`connection attempt ${6 - retries} failed with error: ${error}`);
+                if (error instanceof Error) {
+                    logger.error(`error stack: ${error.stack}`);
+                }
                 retries--;
                 
                 if (retries > 0) {
-                    // Try to get a fresh ws url on retry
                     try {
+                        logger.log('attempting to get fresh ws url...');
                         wsUrl = await getDebuggerUrl(logger);
                         logger.log(`got fresh ws url for retry: ${wsUrl}`);
                     } catch (wsError) {
@@ -103,9 +117,8 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
             }
         }
 
-        
         if (!activeBrowser) {
-            logger.error(`all connection attempts failed: ${lastError}`);
+            logger.error(`all connection attempts failed. last error: ${lastError}`);
             throw new Error(`failed to connect to browser after 5 attempts: ${lastError}`);
         }
     } else {
@@ -117,6 +130,7 @@ export async function setupBrowser(logger: RouteLogger = defaultLogger): Promise
         throw new Error('browser or page not initialized');
     }
 
+    logger.log('setup browser completed successfully');
     return { browser: activeBrowser, page: activePage };
 }
 

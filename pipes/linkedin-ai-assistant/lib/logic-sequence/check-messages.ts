@@ -9,8 +9,8 @@ export async function checkAllMessages() {
     console.log('starting message check automation...');
     const state = await loadState();
     
-    // Check Chrome connection
-    const statusResponse = await fetch('/api/chrome/status');
+    // Updated to use new combined endpoint
+    const statusResponse = await fetch('/api/chrome?action=status');
     const statusData = await statusResponse.json();
     
     if (statusData.status !== 'connected' || !statusData.wsUrl) {

@@ -35,7 +35,7 @@ export async function startAutomation(maxProfiles: number = Infinity) {
         
         // Chrome setup
         updateWorkflowStep('browser', 'running', 'connecting to chrome');
-        const statusResponse = await fetch(`/api/chrome/status`);
+        const statusResponse = await fetch('/api/chrome?action=status');
         const statusData = await statusResponse.json();
         
         if (statusData.status !== 'connected' || !statusData.wsUrl) {
@@ -62,7 +62,7 @@ export async function startAutomation(maxProfiles: number = Infinity) {
         
         const profiles: ProfileVisit[] = profileElements.map((element: ProfileElement) => {
             const cleanUrl = cleanProfileUrl(element.href || '');
-            const name = element.text?.match(/View (.*?)(?:'s|’s|’) profile/)?.[1]?.trim() || 'unknown';
+            const name = element.text?.match(/View (.*?)(?:'s|'s|') profile/)?.[1]?.trim() || 'unknown';
             
             console.log(`extracted name: "${name}" from text: "${element.text}"`);
             
