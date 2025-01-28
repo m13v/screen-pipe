@@ -47,10 +47,12 @@ export type User = {
     amount: number;
   };
   stripe_connected?: boolean;
+  stripe_account_status?: "active" | "pending";
   github_username?: string;
   bio?: string;
   website?: string;
   contact?: string;
+  cloud_subscribed?: boolean;
 };
 
 export type Settings = {
@@ -353,7 +355,7 @@ export function useSettings() {
         (await invoke("get_env", { name: "BASE_URL_PRIVATE" })) ??
         "https://screenpi.pe";
 
-      const response = await fetch(`https://screenpi.pe/api/tauri`, {
+      const response = await fetch(`https://screenpi.pe/api/user`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -366,10 +368,9 @@ export function useSettings() {
       }
 
       const data = await response.json();
+      console.log("data", data);
       const userData = {
-        api_key: settings.user.api_key,
         ...data.user,
-        stripe_connected: data.user.stripe_connected ?? false,
       } as User;
 
       setSettings({

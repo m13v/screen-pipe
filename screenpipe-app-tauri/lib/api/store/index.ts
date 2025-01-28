@@ -8,6 +8,7 @@ export interface PipeStorePlugin {
   price: number | null;
   status: string | null;
   created_at: string | null;
+  source_code: string | null;
   developer_accounts: {
     developer_name: string;
   };
@@ -35,16 +36,10 @@ export interface PurchaseHistoryItem {
   currency: string;
   stripe_payment_status: string;
   created_at: string;
-  refunded_at: null;
-  plugins: Plugins;
-}
-interface Plugins {
-  id: string;
-  name: string;
-  description: string;
-  developer_accounts: Developer_accounts;
-}
-interface Developer_accounts {
+  refunded_at: string | null;
+  plugin_id: string;
+  plugin_name: string;
+  plugin_description: string;
   developer_name: string;
 }
 
@@ -91,7 +86,7 @@ export class PipeApi {
     }
   }
 
-  async getUserPurchaseHistory(): Promise<any> {
+  async getUserPurchaseHistory(): Promise<PurchaseHistoryResponse> {
     try {
       const response = await fetch(
         `${this.baseUrl}/api/plugins/user-purchase-history`,
@@ -105,7 +100,9 @@ export class PipeApi {
         const { error } = (await response.json()) as { error: string };
         throw new Error(`failed to fetch purchase history: ${error}`);
       }
+
       const data = (await response.json()) as PurchaseHistoryResponse;
+      console.log("purchase history data", data);
       return data;
     } catch (error) {
       console.error("error getting purchase history:", error);
@@ -147,6 +144,7 @@ export class PipeApi {
         throw new Error(`failed to purchase pipe: ${error}`);
       }
       const data = (await response.json()) as PurchaseUrlResponse;
+      console.log("purchase data", data);
       return data;
     } catch (error) {
       console.error("error purchasing pipe:", error);
@@ -177,7 +175,7 @@ export class PipeApi {
       const data = (await response.json()) as PipeDownloadResponse;
       return data;
     } catch (error) {
-      console.error("error downloading pipe:", error);
+      console.warn("error downloading pipe:", error);
       throw error;
     }
   }

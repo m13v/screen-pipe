@@ -6,7 +6,6 @@ mod tests {
     use axum::Router;
     use chrono::DateTime;
     use chrono::{Duration, Utc};
-    use crossbeam::queue::SegQueue;
     use screenpipe_audio::{AudioDevice, DeviceType};
     use screenpipe_server::db_types::ContentType;
     use screenpipe_server::db_types::SearchResult;
@@ -45,9 +44,6 @@ mod tests {
                 FrameCache::new(PathBuf::from(""), db).await.unwrap(),
             )),
             ui_monitoring_enabled: false,
-            realtime_transcription_sender: Arc::new(tokio::sync::broadcast::channel(1000).0),
-            realtime_transcription_enabled: false,
-            realtime_vision_sender: Arc::new(tokio::sync::broadcast::channel(1000).0),
         });
 
         let router = create_router();
@@ -177,30 +173,28 @@ mod tests {
             .unwrap();
         let frame_id1 = db.insert_frame("test_device", None).await.unwrap();
         let frame_id2 = db.insert_frame("test_device", None).await.unwrap();
-        let _ = db
-            .insert_ocr_text(
-                frame_id1,
-                "This is a test OCR text", // 21 chars
-                "",
-                "TestApp",
-                "TestWindow",
-                Arc::new(OcrEngine::Tesseract),
-                false,
-            )
-            .await
-            .unwrap();
-        let _ = db
-            .insert_ocr_text(
-                frame_id2,
-                "Another OCR text for testing that should be longer than thirty characters", // >30 chars
-                "",
-                "TestApp2",
-                "TestWindow2",
-                Arc::new(OcrEngine::Tesseract),
-                false,
-            )
-            .await
-            .unwrap();
+        db.insert_ocr_text(
+            frame_id1,
+            "This is a test OCR text", // 21 chars
+            "",
+            "TestApp",
+            "TestWindow",
+            Arc::new(OcrEngine::Tesseract),
+            false,
+        )
+        .await
+        .unwrap();
+        db.insert_ocr_text(
+            frame_id2,
+            "Another OCR text for testing that should be longer than thirty characters", // >30 chars
+            "",
+            "TestApp2",
+            "TestWindow2",
+            Arc::new(OcrEngine::Tesseract),
+            false,
+        )
+        .await
+        .unwrap();
 
         let audio_chunk_id1 = db.insert_audio_chunk("test_audio1.wav").await.unwrap();
         let audio_chunk_id2 = db.insert_audio_chunk("test_audio2.wav").await.unwrap();
@@ -243,6 +237,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -253,6 +248,7 @@ mod tests {
             .count_search_results(
                 "OCR",
                 ContentType::OCR,
+                None,
                 None,
                 None,
                 None,
@@ -277,6 +273,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -290,6 +287,7 @@ mod tests {
                 None,
                 None,
                 Some("TestApp"),
+                None,
                 None,
                 None,
                 None,
@@ -311,6 +309,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -326,6 +325,7 @@ mod tests {
                 None,
                 None,
                 Some(30),
+                None,
                 None,
                 None,
             )
@@ -344,6 +344,7 @@ mod tests {
                 None,
                 None,
                 Some(25),
+                None,
                 None,
             )
             .await
@@ -378,18 +379,17 @@ mod tests {
             .unwrap();
 
         // insert ocr and audio data
-        let _ = db
-            .insert_ocr_text(
-                frame_id1,
-                "old ocr text",
-                "",
-                "testapp",
-                "testwindow",
-                Arc::new(OcrEngine::Tesseract),
-                false,
-            )
-            .await
-            .unwrap();
+        db.insert_ocr_text(
+            frame_id1,
+            "old ocr text",
+            "",
+            "testapp",
+            "testwindow",
+            Arc::new(OcrEngine::Tesseract),
+            false,
+        )
+        .await
+        .unwrap();
 
         let audio_transcription_id1 = db
             .insert_audio_transcription(
@@ -425,6 +425,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -437,6 +438,7 @@ mod tests {
                 10,
                 0,
                 Some(now - Duration::minutes(1)),
+                None,
                 None,
                 None,
                 None,
@@ -457,6 +459,7 @@ mod tests {
                 0,
                 None,
                 Some(now - Duration::minutes(10)),
+                None,
                 None,
                 None,
                 None,
@@ -485,6 +488,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -507,6 +511,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -517,6 +522,7 @@ mod tests {
                 "audio",
                 ContentType::Audio,
                 Some(two_hours_ago - Duration::minutes(100)),
+                None,
                 None,
                 None,
                 None,
@@ -568,31 +574,29 @@ mod tests {
             .await
             .unwrap();
 
-        let _ = db
-            .insert_ocr_text(
-                old_frame_id,
-                "old task: write documentation",
-                "",
-                "vscode",
-                "tasks.md",
-                Arc::new(OcrEngine::Tesseract),
-                false,
-            )
-            .await
-            .unwrap();
+        db.insert_ocr_text(
+            old_frame_id,
+            "old task: write documentation",
+            "",
+            "vscode",
+            "tasks.md",
+            Arc::new(OcrEngine::Tesseract),
+            false,
+        )
+        .await
+        .unwrap();
 
-        let _ = db
-            .insert_ocr_text(
-                recent_frame_id,
-                "current task: fix bug #123",
-                "",
-                "vscode",
-                "tasks.md",
-                Arc::new(OcrEngine::Tesseract),
-                false,
-            )
-            .await
-            .unwrap();
+        db.insert_ocr_text(
+            recent_frame_id,
+            "current task: fix bug #123",
+            "",
+            "vscode",
+            "tasks.md",
+            Arc::new(OcrEngine::Tesseract),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Search with 30-second window
         let results = db
@@ -602,6 +606,7 @@ mod tests {
                 10,
                 0,
                 Some(now - Duration::seconds(30)),
+                None,
                 None,
                 None,
                 None,
@@ -630,6 +635,7 @@ mod tests {
                 0,
                 Some(old_timestamp - Duration::seconds(1)),
                 Some(old_timestamp + Duration::seconds(1)),
+                None,
                 None,
                 None,
                 None,
@@ -677,6 +683,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -692,6 +699,7 @@ mod tests {
                 0,
                 Some(four_hours_ago - Duration::minutes(5)),
                 Some(four_hours_ago + Duration::minutes(5)),
+                None,
                 None,
                 None,
                 None,

@@ -20,7 +20,6 @@ use screenpipe_server::{
 use screenpipe_vision::monitor::list_monitors;
 #[cfg(target_os = "macos")]
 use screenpipe_vision::run_ui;
-use sentry;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -261,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => {
                         warn!("ffmpeg check failed: {}", e);
                         warn!("please ensure ffmpeg is installed correctly and is in your PATH");
-                        return Err(e.into());
+                        return Err(e);
                     }
                 }
 
@@ -523,19 +522,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let audio_chunk_duration = Duration::from_secs(cli.audio_chunk_duration);
-    let (realtime_transcription_sender, _) = tokio::sync::broadcast::channel(1000);
-    let realtime_transcription_sender_clone = realtime_transcription_sender.clone();
-    let (realtime_vision_sender, _) = tokio::sync::broadcast::channel(1000);
-    let realtime_vision_sender = Arc::new(realtime_vision_sender.clone());
-    let realtime_vision_sender_clone = realtime_vision_sender.clone();
     let handle = {
         let runtime = &tokio::runtime::Handle::current();
         runtime.spawn(async move {
             loop {
-                let realtime_vision_sender_clone = realtime_vision_sender.clone();
                 let vad_engine_clone = vad_engine.clone(); // Clone it here for each iteration
                 let mut shutdown_rx = shutdown_tx_clone.subscribe();
-                let realtime_transcription_sender_clone = realtime_transcription_sender.clone();
                 let recording_future = start_continuous_recording(
                     db_clone.clone(),
                     output_path_clone.clone(),
@@ -561,8 +553,6 @@ async fn main() -> anyhow::Result<()> {
                     cli.capture_unfocused_windows,
                     realtime_audio_devices.clone(),
                     cli.enable_realtime_audio_transcription,
-                    Arc::new(realtime_transcription_sender_clone), // Use the cloned sender
-                    realtime_vision_sender_clone,
                 );
 
                 let result = tokio::select! {
@@ -585,7 +575,7 @@ async fn main() -> anyhow::Result<()> {
     debug!("LLM initializing");
 
     #[cfg(feature = "llm")]
-    let llm = {
+    let _llm = {
         match cli.enable_llm {
             true => Some(screenpipe_core::LLM::new(
                 screenpipe_core::ModelName::Llama,
@@ -606,7 +596,6 @@ async fn main() -> anyhow::Result<()> {
     let (audio_devices_tx, _) = broadcast::channel(100);
     let audio_devices_tx_clone = Arc::new(audio_devices_tx.clone());
 
-    let realtime_vision_sender_clone = realtime_vision_sender_clone.clone();
     // TODO: Add SSE stream for realtime audio transcription
     let server = Server::new(
         db_server,
@@ -618,9 +607,6 @@ async fn main() -> anyhow::Result<()> {
         cli.disable_vision,
         cli.disable_audio,
         cli.enable_ui_monitoring,
-        cli.enable_realtime_audio_transcription,
-        realtime_transcription_sender_clone,
-        realtime_vision_sender_clone.clone(),
     );
 
     let mut rx = audio_devices_tx.subscribe();
@@ -644,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
     ) -> anyhow::Result<()> {
         match list_audio_devices().await {
             Ok(available_devices) => {
-                if !available_devices.contains(&device) {
+                if !available_devices.contains(device) {
                     return Err(anyhow::anyhow!(
                         "attempted to control non-existent device: {}",
                         device.name
@@ -1006,7 +992,7 @@ async fn main() -> anyhow::Result<()> {
 
             loop {
                 tokio::select! {
-                    result = run_ui(realtime_vision_sender_clone.clone()) => {
+                    result = run_ui() => {
                         match result {
                             Ok(_) => break,
                             Err(e) => {
@@ -1061,7 +1047,7 @@ async fn handle_pipe_command(
         PipeCommand::List { output, port } => {
             let server_url = format!("{}:{}", server_url, port);
             let pipes = match client
-                .get(&format!("{}/pipes/list", server_url))
+                .get(format!("{}/pipes/list", server_url))
                 .send()
                 .await
             {
@@ -1107,7 +1093,7 @@ async fn handle_pipe_command(
         PipeCommand::Download { url, output, port }
         | PipeCommand::Install { url, output, port } => {
             match client
-                .post(&format!("{}:{}/pipes/download", server_url, port))
+                .post(format!("{}:{}/pipes/download", server_url, port))
                 .json(&json!({ "url": url }))
                 .send()
                 .await
@@ -1157,7 +1143,7 @@ async fn handle_pipe_command(
 
         PipeCommand::Info { id, output, port } => {
             let info = match client
-                .get(&format!("{}:{}/pipes/info/{}", server_url, port, id))
+                .get(format!("{}:{}/pipes/info/{}", server_url, port, id))
                 .send()
                 .await
             {
@@ -1178,7 +1164,7 @@ async fn handle_pipe_command(
         }
         PipeCommand::Enable { id, port } => {
             match client
-                .post(&format!("{}:{}/pipes/enable", server_url, port))
+                .post(format!("{}:{}/pipes/enable", server_url, port))
                 .json(&json!({ "pipe_id": id }))
                 .send()
                 .await
@@ -1197,7 +1183,7 @@ async fn handle_pipe_command(
 
         PipeCommand::Disable { id, port } => {
             match client
-                .post(&format!("{}:{}/pipes/disable", server_url, port))
+                .post(format!("{}:{}/pipes/disable", server_url, port))
                 .json(&json!({ "pipe_id": id }))
                 .send()
                 .await
@@ -1219,7 +1205,7 @@ async fn handle_pipe_command(
                 .map_err(|e| anyhow::anyhow!("invalid json: {}", e))?;
 
             match client
-                .post(&format!("{}:{}/pipes/update", server_url, port))
+                .post(format!("{}:{}/pipes/update", server_url, port))
                 .json(&json!({
                     "pipe_id": id,
                     "config": config
@@ -1250,7 +1236,7 @@ async fn handle_pipe_command(
             }
 
             match client
-                .delete(&format!("{}:{}/pipes/delete/{}", server_url, port, id))
+                .delete(format!("{}:{}/pipes/delete/{}", server_url, port, id))
                 .send()
                 .await
             {
@@ -1277,7 +1263,7 @@ async fn handle_pipe_command(
             }
 
             match client
-                .post(&format!("{}:{}/pipes/purge", server_url, port))
+                .post(format!("{}:{}/pipes/purge", server_url, port))
                 .send()
                 .await
             {
