@@ -132,7 +132,7 @@ export function useBrowserTranscriptionStream(
         streamingRef.current = false
         // Attempt reconnection if not intentionally closed
         if (event.code !== 1000) {
-          console.log('attempting to reconnect...')
+          console.log(' reconnect...')
           setTimeout(startTranscriptionBrowser, 2000)
         }
       }
@@ -153,7 +153,11 @@ export function useBrowserTranscriptionStream(
 
   const stopTranscriptionBrowser = useCallback(() => {
     if (socketRef.current) {
-      socketRef.current.send(JSON.stringify({ type: 'CloseStream' }))
+      console.log('browser transcription: stopping websocket...')
+      // Only send close message if socket is connected (OPEN state)
+      if (socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: 'CloseStream' }))
+      }
       socketRef.current.close()
       socketRef.current = null
     }

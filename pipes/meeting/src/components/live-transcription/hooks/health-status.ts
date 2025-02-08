@@ -15,66 +15,35 @@ export function useServiceStatus() {
     setIsChecking(true)
     console.log('health-status: starting service check')
     
-    let testSource: EventSource | null = null
-    
     try {
-      testSource = new EventSource('http://localhost:3030/sse/transcriptions')
-      
-      const result = await Promise.race([
-        new Promise<void>((resolve, reject) => {
-          testSource!.onopen = () => {
-            console.log('health-status: test connection opened')
-          }
-
-          testSource!.onmessage = async (event) => {
-            console.log('health-status: received test message:', event.data)
-            
-            if (event.data === 'keep-alive-text') {
-              console.log('health-status: received keep-alive, service available')
-              setServiceStatus('available')
-              await startTranscription()
-              resolve()
-              return
-            }
-
-            try {
-              const chunk = JSON.parse(event.data)
-              console.log('health-status: parsed test chunk:', chunk)
-              
-              if (chunk.error?.includes('invalid subscription') || 
-                  chunk.choices?.[0]?.text?.includes('invalid subscription')) {
-                console.log('health-status: invalid subscription detected')
-                setServiceStatus('no_subscription')
-                reject(new Error('invalid subscription'))
-              } else {
-                console.log('health-status: service check successful')
-                setServiceStatus('available')
-                await startTranscription()
-                resolve()
-              }
-            } catch (e) {
-              console.error('health-status: failed to parse chunk:', e)
-              reject(e)
-            }
-          }
-
-          testSource!.onerror = (error) => {
-            console.error('health-status: test connection error:', error)
-            setServiceStatus('unavailable')
-            reject(new Error('health check failed'))
-          }
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('health check timeout')), 5000)
-        )
-      ])
-
-      return result
+      // Try to get first chunk from stream to verify service is working
+      for await (const chunk of pipe.streamTranscriptions()) {
+        console.log('health-status: received test chunk:', {
+          chunk,
+          choices: chunk.choices,
+          metadata: chunk.metadata
+        })
+        
+        if (chunk.error?.includes('invalid subscription') || 
+            chunk.choices?.[0]?.text?.includes('invalid subscription')) {
+          console.log('health-status: invalid subscription detected')
+          setServiceStatus('no_subscription')
+          throw new Error('invalid subscription')
+        }
+        
+        console.log('health-status: service check successful')
+        setServiceStatus('available')
+        await startTranscription()
+        break // Only need first chunk to verify
+      }
     } catch (error) {
-      console.error('health-status: service check failed:', error)
+      console.error('health-status: service check failed:', {
+        error,
+        message: error instanceof Error ? error.message : 'unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      })
       setServiceStatus('unavailable')
     } finally {
-      testSource?.close()
       setIsChecking(false)
       console.log('health-status: check completed, status:', serviceStatus)
     }

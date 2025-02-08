@@ -26,90 +26,55 @@ export function useTranscriptionStream(
 
   const startTranscriptionScreenpipe = useCallback(async () => {
     if (streamingRef.current) {
-      console.log('transcription already streaming');
-      return;
+      console.log('transcription already streaming')
+      return
     }
-    
-    try {
-      console.log('starting transcription stream...');
-      if (window._eventSource) {
-        console.log('closing existing event source');
-        window._eventSource.close();
-      }
-      
-      streamingRef.current = true;
-      const eventSource = new EventSource('http://localhost:3030/sse/transcriptions');
-      window._eventSource = eventSource;
-      
-      eventSource.onopen = () => {
-        console.log('sse connection opened');
-      };
-      
-      let currentChunk: TranscriptionChunk | null = null
-      
-      eventSource.onmessage = (event) => {
-        if (event.data === 'keep-alive-text') return
-        
-        const chunk = JSON.parse(event.data)
-        console.log('new transcription chunk:', chunk)
-        
-        // If same speaker, append text with typing effect
-        if (currentChunk && currentChunk.speaker === chunk.speaker) {
-          const words = chunk.transcription.split(' ')
-          let wordIndex = 0
-          
-          const typeWords = () => {
-            if (wordIndex < words.length) {
-              currentChunk!.text += (currentChunk!.text ? ' ' : '') + words[wordIndex]
-              setChunks(prev => [...prev.slice(0, -1), { ...currentChunk! }])
-              wordIndex++
-              setTimeout(typeWords, 20)
-            }
-          }
-          
-          typeWords()
-        } else {
-          // New speaker or first chunk, create new entry
-          currentChunk = {
-            id: Date.now(),
-            timestamp: chunk.timestamp,
-            text: chunk.transcription,
-            isInput: chunk.is_input,
-            device: chunk.device,
-            speaker: chunk.speaker
-          }
-          setChunks(prev => [...prev, currentChunk!])
-        }
-      }
 
-      eventSource.onerror = (error) => {
-        console.error("sse error:", {
-          error,
-          readyState: eventSource.readyState,
-          // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
-          status: eventSource.readyState === 0 ? 'connecting' : 
-                  eventSource.readyState === 1 ? 'open' : 'closed',
-          url: eventSource.url,
-          withCredentials: eventSource.withCredentials,
-        });
+    try {
+      console.log('starting transcription stream...')
+      streamingRef.current = true
+
+      console.log('attempting to get stream from pipe.streamTranscriptions()')
+      const stream = pipe.streamTranscriptions()
+      console.log('got stream object:', stream)
+
+      for await (const chunk of stream) {
+        // Log raw chunk first
+        console.log('raw chunk received:', JSON.stringify(chunk, null, 2))
         
-        // Add retry logic
-        if (eventSource.readyState !== EventSource.CLOSED) {
-          console.log("sse: attempting to reconnect...");
-          return; // EventSource will automatically try to reconnect
-        }
-        
-        eventSource.close();
-        streamingRef.current = false;
-        toast({
-          title: "action needed",
-          description: "please enable realtime audio transcription in account -> settings -> recording",
-          variant: "destructive",
-        });
+        // Then log specific properties we care about
+        console.log('chunk details:', {
+          id: chunk.id,
+          object: chunk.object,
+          created: chunk.created,
+          model: chunk.model,
+          choiceText: chunk?.choices?.[0]?.text,
+          finishReason: chunk?.choices?.[0]?.finish_reason,
+          metadata: chunk.metadata,
+        })
+
+        setChunks(prev => [...prev, {
+          text: chunk.choices[0].text,
+          timestamp: new Date().toISOString(),
+          isInput: chunk.metadata?.isInput ?? false,
+          device: chunk.metadata?.device ?? 'unknown',
+          id: Date.now()
+        }])
       }
     } catch (error) {
-      console.error("failed to start transcription:", error);
-      streamingRef.current = false;
+      console.error('transcription stream error:', {
+        error,
+        message: error instanceof Error ? error.message : 'unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        phase: streamingRef.current ? 'during-stream' : 'stream-setup'
+      })
+      
+      streamingRef.current = false
+      toast({
+        title: "transcription error",
+        description: "please enable realtime audio transcription in account -> settings -> recording",
+        variant: "destructive",
+      })
     }
   }, [toast, setChunks])
 
