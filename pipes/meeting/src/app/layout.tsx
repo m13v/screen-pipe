@@ -6,6 +6,7 @@ import PostHogProvider from "@/components/providers/posthog-provider"
 import { Analytics } from "@vercel/analytics/react"
 import { ChatButton } from "@/components/chat-button"
 import { SettingsProvider } from "@/lib/hooks/use-settings"
+import { AudioHealthProvider } from "@/lib/hooks/use-audio-health"
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -35,12 +36,14 @@ export default function RootLayout({
       >
         <PostHogProvider>
           <SettingsProvider>
-            <main className="h-full p-4 overflow-hidden">
-              {children}
-            </main>
-            <Toaster />
-            <ChatButton />
-            <Analytics mode={process.env.NODE_ENV === "development" ? "development" : "production"} />
+            <AudioHealthProvider>
+              <main className="h-full p-4 overflow-hidden">
+                {children}
+              </main>
+              <Toaster />
+              <ChatButton />
+              <Analytics mode={process.env.NODE_ENV === "development" ? "development" : "production"} />
+            </AudioHealthProvider>
           </SettingsProvider>
         </PostHogProvider>
       </body>

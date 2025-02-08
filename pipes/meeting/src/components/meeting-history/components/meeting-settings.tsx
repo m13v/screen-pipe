@@ -7,14 +7,14 @@ import { ArrowLeft, Trash2, Eye, EyeOff } from "lucide-react"
 import { useEffect, useState } from 'react'
 import { getMeetings, getAllUpdates } from '../hooks/storage-meeting-data'
 import { liveStore } from '../../live-transcription/hooks/storage-for-live-meeting'
+import { useAudioHealth } from "@/lib/hooks/use-audio-health"
 
 interface MeetingSettingsProps {
   onBack: () => void
 }
 
-type TranscriptionMode = 'browser' | 'screenpipe'
-
 export function MeetingSettings({ onBack }: MeetingSettingsProps) {
+  const { isHealthy, status } = useAudioHealth()
   const [stats, setStats] = useState<{
     meetingsCount: number
     updatesCount: number
@@ -30,7 +30,6 @@ export function MeetingSettings({ onBack }: MeetingSettingsProps) {
     updates: Record<string, any>
     liveMeetings: Record<string, any>
   }>()
-  const [transcriptionMode, setTranscriptionMode] = useState<TranscriptionMode>('browser')
 
   useEffect(() => {
     const loadData = async () => {
@@ -90,42 +89,24 @@ export function MeetingSettings({ onBack }: MeetingSettingsProps) {
         </Button>
       </div>
 
-      {/* transcription mode selector */}
+      {/* transcription status section */}
       <div className="space-y-4 mb-8">
-        <h2 className="text-lg font-semibold">transcription mode</h2>
-        <div className="flex gap-2 p-1 bg-muted rounded-lg">
-          <button
-            className={`flex-1 px-4 py-2 rounded-md transition-colors ${
-              transcriptionMode === 'screenpipe' 
-                ? 'bg-background shadow-sm' 
-                : 'hover:bg-background/50'
-            }`}
-            onClick={() => {
-              console.log('changing transcription mode to: screenpipe')
-              setTranscriptionMode('screenpipe')
-            }}
-          >
-            screenpipe
-          </button>
-          <button
-            className={`flex-1 px-4 py-2 rounded-md transition-colors ${
-              transcriptionMode === 'browser' 
-                ? 'bg-background shadow-sm' 
-                : 'hover:bg-background/50'
-            }`}
-            onClick={() => {
-              console.log('changing transcription mode to: browser')
-              setTranscriptionMode('browser')
-            }}
-          >
-            browser
-          </button>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">transcription status</h2>
         </div>
-        <p className="text-sm text-muted-foreground">
-          {transcriptionMode === 'screenpipe' 
-            ? 'uses screenpipe to power your meeting notes'
-            : 'use browser-based transcription, no extra local context available'}
-        </p>
+        <div className="p-4 rounded-lg bg-muted">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isHealthy ? 'bg-green-500' : 'bg-red-500'}`} />
+            <span className="font-medium">
+              {isHealthy ? 'screenpipe transcription' : 'browser transcription'}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground mt-2">
+            {isHealthy 
+              ? 'using screenpipe for enhanced transcription with AI agenda and context'
+              : 'fallback to browser-based transcription due to audio system unavailability'}
+          </p>
+        </div>
       </div>
 
       {/* storage stats section */}

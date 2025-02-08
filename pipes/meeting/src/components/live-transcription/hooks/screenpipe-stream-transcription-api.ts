@@ -83,16 +83,29 @@ export function useTranscriptionStream(
       }
 
       eventSource.onerror = (error) => {
-        console.error("sse error:", error);
+        console.error("sse error:", {
+          error,
+          readyState: eventSource.readyState,
+          // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
+          status: eventSource.readyState === 0 ? 'connecting' : 
+                  eventSource.readyState === 1 ? 'open' : 'closed',
+          url: eventSource.url,
+          withCredentials: eventSource.withCredentials,
+        });
+        
+        // Add retry logic
+        if (eventSource.readyState !== EventSource.CLOSED) {
+          console.log("sse: attempting to reconnect...");
+          return; // EventSource will automatically try to reconnect
+        }
+        
         eventSource.close();
         streamingRef.current = false;
         toast({
-          title: "transcription error",
-          description: "failed to stream audio. retrying...",
-          variant: "destructive"
+          title: "action needed",
+          description: "please enable realtime audio transcription in account -> settings -> recording",
+          variant: "destructive",
         });
-        console.log('scheduling retry...');
-        setTimeout(startTranscriptionScreenpipe, 1000);
       }
     } catch (error) {
       console.error("failed to start transcription:", error);
