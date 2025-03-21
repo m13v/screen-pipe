@@ -1,4 +1,4 @@
-import type { ElementInfo, ElementSelector } from "../../common/types";
+import type { ElementInfo, ElementSelector, ElementPosition, ElementSize, ElementStats } from "../../common/types";
 
 export interface ClickResult {
   method: 'AXPress' | 'AXClick' | 'MouseSimulation';
@@ -9,6 +9,53 @@ export interface ClickResult {
 export interface ClickResponse {
   success: boolean;
   result?: ClickResult;
+}
+
+export interface TextRequest {
+  app_name: string;
+  window_name?: string;
+  max_depth?: number;
+  use_background_apps?: boolean;
+  activate_app?: boolean;
+}
+
+export interface GetTextMetadata {
+  extraction_time_ms: number;
+  element_count: number;
+  app_name: string;
+  timestamp_utc: string;
+}
+
+export interface TextResponse {
+  success: boolean;
+  text: string;
+  metadata?: GetTextMetadata;
+}
+
+export interface InteractableElementsRequest {
+  app_name: string;
+  window_name?: string;
+  with_text_only?: boolean;
+  interactable_only?: boolean;
+  include_sometimes_interactable?: boolean;
+  max_elements?: boolean;
+  use_background_apps?: boolean;
+  activate_apps?: boolean;
+}
+
+export interface InteractableElement {
+  index: number, 
+  role: string,
+  interactability: string,   // "definite", "sometimes", "none"
+  text: string, 
+  position?: ElementPosition,
+  size?: ElementSize,
+  element_id?: string,
+}
+
+export interface InteractableElementsResponse {
+  elements: InteractableElementsRequest[];
+  status: ElementStats,
 }
 
 export class Operator {
@@ -183,6 +230,8 @@ export class Operator {
       activate_app: options.activateApp !== false,
     };
 
+    console.log("selector", selector)
+
     const response = await fetch(`${this.baseUrl}/experimental/operator/type`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -262,6 +311,149 @@ export class Operator {
     }
 
     return null;
+  }
+
+  /**
+   * get text on the screen 
+   *
+   * @returns Detailed information about get_text operation
+   *
+   * @example
+   * // Gets all the text from an app
+   * await browserPipe.operator
+   *   .get_text({
+   *     app: app,
+   *   });
+   */
+    async get_text(options: {
+      app: string;
+      window?: string;
+      max_depth?: number;
+      useBackgroundApps?: boolean;
+      activateApp?: boolean;
+    }): Promise<TextResponse> {
+      const text: TextRequest = {
+        app_name: options.app,
+        window_name: options.window,
+        max_depth: options.max_depth,
+        use_background_apps: options.useBackgroundApps,
+        activate_app: options.activateApp !== false,
+      };
+  
+      const response = await fetch(
+        `${this.baseUrl}/experimental/operator/get_text`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(text),
+        }
+      );
+  
+      if (!response.ok) {
+        console.log("error:", response)
+        const errorData = await response.json();
+        throw new Error(
+          `failed to get text: ${errorData.message || response.statusText}`
+        );
+      }
+  
+      const data = await response.json();
+      console.log("debug: text response data:", JSON.stringify(data, null, 2));
+      
+      if (!data.success) {
+        throw new Error(`get_text operation failed: ${data.error || "unknown error"}`);
+      }
+      
+      return data as TextResponse;
+    }
+
+  /**
+   * get text on the screen 
+   *
+   * @returns Detailed information about get_text operation
+   *
+   * @example
+   * // Gets all the text from an app
+   * await browserPipe.operator
+   *   .get_text({
+   *     app: app,
+   *   });
+   */
+    async get_interactable_elements(options: {
+      app: string;
+      window?: string;
+      with_text_only?: boolean;
+      interactable_only?: boolean;
+      include_sometimes_interactable?: boolean;
+      max_elements?: boolean;
+      use_background_apps?: boolean;
+      activate_apps?: boolean;
+    }): Promise<InteractableElementsResponse> {
+      const request: InteractableElementsRequest = {
+        app_name: options.app,
+        window_name: options.window,
+        with_text_only: options.with_text_only,
+        interactable_only: options.interactable_only,
+        include_sometimes_interactable: options.include_sometimes_interactable,
+        max_elements: options.max_elements,
+        use_background_apps: options.use_background_apps,
+        activate_apps: options.activate_apps,
+      };
+    
+      const response = await fetch(
+        `${this.baseUrl}/experimental/operator/list-interactable-elements`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        }
+      );
+  
+      if (!response.ok) {
+        console.log("error:", response)
+        const errorData = await response.json();
+        throw new Error(
+          `failed to get: ${errorData.message || response.statusText}`
+        );
+      }
+  
+      const data = await response.json();
+      console.log("debug: text response data:", JSON.stringify(data, null, 2));
+            
+      return data as InteractableElementsResponse;
+    }
+
+  /**
+   * Click an element by its index from the cached element list
+   * 
+   * @example
+   * // Click the element at index 5
+   * await pipe.operator.clickByIndex(5);
+   */
+  async clickByIndex(index: number): Promise<boolean> {
+    const response = await fetch(
+      `${this.baseUrl}/experimental/operator/click-by-index`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ element_index: index }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(
+        `failed to click element by index: ${errorData.error || response.statusText}`
+      );
+    }
+
+    const data = await response.json();
+    
+    if (!data.success) {
+      throw new Error(`click operation failed: ${data.message || "unknown error"}`);
+    }
+    
+    return data.success;
   }
 }
 

@@ -1067,7 +1067,7 @@ impl SCServer {
             .post("/experimental/operator/click", click_element_handler)
             .post("/experimental/operator/type", type_text_handler)
             .post("/experimental/operator/get_text", get_text_handler)
-            .post("/experimental/list-interactable-elements", list_interactable_elements_handler)
+            .post("/experimental/operator/list-interactable-elements", list_interactable_elements_handler)
             .post("/experimental/click-by-index", click_by_index_handler)
             .post("/audio/start", start_audio)
             .post("/audio/stop", stop_audio)
@@ -3463,23 +3463,25 @@ async fn list_interactable_elements_handler(
     };
     
     // Get elements from the application
-    let elements = match app.locator("*") {
-        Ok(locator) => match locator.all() {
-            Ok(elements) => elements,
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    JsonResponse(json!({
-                        "error": format!("Failed to get elements: {}", e)
-                    })),
-                ));
-            }
-        },
+    let locator = match app.locator("") {
+        Ok(locator) => locator,
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 JsonResponse(json!({
-                    "error": format!("Failed to create locator: {}", e)
+                    "error": format!("Failed to get elements: {}", e)
+                })),
+            ));
+        }
+    };
+
+    let elements = match locator.all() {
+        Ok(elements) => elements,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({
+                    "error": format!("Failed to get elements: {}", e)
                 })),
             ));
         }
