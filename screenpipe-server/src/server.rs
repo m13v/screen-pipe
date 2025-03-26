@@ -13,6 +13,7 @@ use oasgen::{oasgen, OaSchema, Server};
 
 use screenpipe_core::Desktop;
 
+use chrono::TimeZone;
 use screenpipe_db::{
     ContentType, DatabaseManager, FrameData, Order, SearchMatch, SearchResult, Speaker,
     TagContentType,
@@ -71,15 +72,13 @@ use tokio::{
 use tower_http::{cors::Any, trace::TraceLayer};
 use tower_http::{cors::CorsLayer, trace::DefaultMakeSpan};
 
-// At the top of the file, add:
-#[cfg(feature = "experimental")]
 use enigo::{Enigo, Key, Settings};
 use std::str::FromStr;
 
 use crate::text_embeds::generate_embedding;
 
-use std::collections::{HashMap, HashSet};
 use screenpipe_core::UIElement;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid; // or sentry::protocol::Uuid depending on which you want to use
 
 pub type FrameImageCache = LruCache<i64, (String, Instant)>;
@@ -292,6 +291,7 @@ pub struct HealthCheckResponse {
     pub ui_status: String,
     pub message: String,
     pub verbose_instructions: Option<String>,
+    pub device_status_details: Option<String>,
 }
 
 #[derive(OaSchema, Serialize, Deserialize)]
@@ -599,12 +599,44 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
     let app_uptime = (now as i64) - (state.app_start_time.timestamp());
     let grace_period = 120; // 2 minutes in seconds
 
-    let last_capture = screenpipe_audio::core::LAST_AUDIO_CAPTURE.load(Ordering::Relaxed);
-    let audio_active = if app_uptime < grace_period {
-        true // Consider active during grace period
-    } else {
-        now - last_capture < 5 // Consider active if captured in last 5 seconds
-    };
+    // Get the status of all devices
+    let audio_devices = state.audio_manager.current_devices();
+    let mut device_statuses = Vec::new();
+    let mut global_audio_active = false;
+    let mut most_recent_audio_timestamp = 0; // Track the most recent timestamp
+
+    // Check each device
+    for device in &audio_devices {
+        let device_name = device.to_string();
+        let last_capture = screenpipe_audio::core::get_device_capture_time(&device_name);
+
+        // Update the most recent timestamp
+        most_recent_audio_timestamp = most_recent_audio_timestamp.max(last_capture);
+
+        let device_active = if app_uptime < grace_period {
+            true // Consider active during grace period
+        } else {
+            now - last_capture < 5 // Consider active if captured in last 5 seconds
+        };
+
+        // Track if any device is active
+        if device_active {
+            global_audio_active = true;
+        }
+        debug!(target: "server", "device status: {} {}", device_name, device_active);
+
+        device_statuses.push((device_name, device_active, last_capture));
+    }
+
+    // Fallback to global timestamp if no devices are detected
+    if audio_devices.is_empty() {
+        let last_capture = screenpipe_audio::core::LAST_AUDIO_CAPTURE.load(Ordering::Relaxed);
+        global_audio_active = if app_uptime < grace_period {
+            true // Consider active during grace period
+        } else {
+            now - last_capture < 5 // Consider active if captured in last 5 seconds
+        };
+    }
 
     let (last_frame, audio, last_ui) = match state.db.get_latest_timestamps().await {
         Ok((frame, audio, ui)) => (frame, audio, ui),
@@ -628,16 +660,45 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
                 "ok"
             }
             Some(_) => "stale",
-            None => "no data",
+            None => "not_started",
         }
     };
 
     let audio_status = if state.audio_disabled {
-        "disabled"
-    } else if audio_active {
-        "ok"
+        "disabled".to_string()
+    } else if global_audio_active {
+        "ok".to_string()
     } else {
-        "stale"
+        match audio {
+            Some(timestamp)
+                if now.signed_duration_since(timestamp)
+                    < chrono::Duration::from_std(threshold).unwrap() =>
+            {
+                "stale".to_string()
+            }
+            Some(_) => "stale".to_string(),
+            None => "not_started".to_string(),
+        }
+    };
+
+    // Format device statuses as a string for a more detailed view
+    let device_status_details = if !device_statuses.is_empty() {
+        let now_secs = now.timestamp() as u64;
+        let device_details: Vec<String> = device_statuses
+            .iter()
+            .map(|(name, active, last_capture)| {
+                format!(
+                    "{}: {} (last activity: {}s ago)",
+                    name,
+                    if *active { "active" } else { "inactive" },
+                    now_secs.saturating_sub(*last_capture)
+                )
+            })
+            .collect();
+
+        Some(device_details.join(", "))
+    } else {
+        None
     };
 
     let ui_status = if !state.ui_monitoring_enabled {
@@ -651,7 +712,7 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
                 "ok"
             }
             Some(_) => "stale",
-            None => "no data",
+            None => "not_started",
         }
     };
 
@@ -675,15 +736,15 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
             unhealthy_systems.push("audio");
         }
         if ui_status != "ok" && ui_status != "disabled" {
-            unhealthy_systems.push("ui monitoring");
+            unhealthy_systems.push("ui");
         }
 
+        let systems_str = unhealthy_systems.join(", ");
         (
-            "unhealthy",
-            format!("some systems are not functioning properly: {}. frame status: {}, audio status: {}, ui status: {}",
-                    unhealthy_systems.join(", "), frame_status, audio_status, ui_status),
-            Some("if you're experiencing issues, please try contacting us on discord".to_string()),
-            500,
+            "degraded",
+            format!("some systems are not healthy: {}", systems_str),
+            Some(get_verbose_instructions(&unhealthy_systems)),
+            503,
         )
     };
 
@@ -691,15 +752,47 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
         status: overall_status.to_string(),
         status_code,
         last_frame_timestamp: last_frame,
-        last_audio_timestamp: audio,
+        last_audio_timestamp: if most_recent_audio_timestamp > 0 {
+            Some(
+                Utc.timestamp_opt(most_recent_audio_timestamp as i64, 0)
+                    .unwrap(),
+            )
+        } else {
+            None
+        },
         last_ui_timestamp: last_ui,
         frame_status: frame_status.to_string(),
-        audio_status: audio_status.to_string(),
+        audio_status,
         ui_status: ui_status.to_string(),
         message,
         verbose_instructions,
+        device_status_details,
     })
 }
+
+fn get_verbose_instructions(unhealthy_systems: &[&str]) -> String {
+    let mut instructions = String::new();
+
+    if unhealthy_systems.contains(&"vision") {
+        instructions.push_str("Vision system is not working properly. Check if screen recording permissions are enabled.\n");
+    }
+
+    if unhealthy_systems.contains(&"audio") {
+        instructions.push_str("Audio system is not working properly. Check if microphone permissions are enabled and devices are connected.\n");
+    }
+
+    if unhealthy_systems.contains(&"ui") {
+        instructions.push_str("UI monitoring is not working properly. Check if accessibility permissions are enabled.\n");
+    }
+
+    if instructions.is_empty() {
+        instructions =
+            "If you're experiencing issues, please try contacting us on Discord.".to_string();
+    }
+
+    instructions
+}
+
 // Request and response structs
 #[derive(OaSchema, Deserialize)]
 struct DownloadPipeRequest {
@@ -979,9 +1072,6 @@ impl SCServer {
         // Create the OpenAPI server
         let app = self.create_router(enable_frame_cache).await;
 
-        #[cfg(feature = "experimental")]
-        let app = app.route("/experimental/input_control", post(input_control_handler));
-
         // Create the listener
         let listener = TcpListener::bind(&self.addr).await?;
         info!("Server listening on {}", self.addr);
@@ -1066,12 +1156,33 @@ impl SCServer {
             .post("/experimental/operator", find_elements_handler)
             .post("/experimental/operator/click", click_element_handler)
             .post("/experimental/operator/type", type_text_handler)
+
             .post("/experimental/operator/press-key", press_key_handler)
             .post("/experimental/operator/get_text", get_text_handler)
-            .post("/experimental/operator/list-interactable-elements", list_interactable_elements_handler)
-            .post("/experimental/operator/click-by-index", click_by_index_handler)
-            .post("/experimental/operator/type-by-index", type_by_index_handler)
-            .post("/experimental/operator/press-key-by-index", press_key_by_index_handler)
+            .post(
+                "/experimental/operator/list-interactable-elements",
+                list_interactable_elements_handler,
+            )
+            .post(
+                "/experimental/operator/click-by-index",
+                click_by_index_handler,
+            )
+            .post(
+                "/experimental/operator/type-by-index",
+                type_by_index_handler,
+            )
+            .post(
+                "/experimental/operator/press-key-by-index",
+                press_key_by_index_handler,
+            )
+            .post(
+                "/experimental/operator/open-application",
+                open_application_handler,
+            )
+            .post("/experimental/operator/open-url", open_url_handler)
+
+            .post("/experimental/input_control", input_control_handler)
+
             .post("/audio/start", start_audio)
             .post("/audio/stop", stop_audio)
             .get("/semantic-search", semantic_search_handler)
@@ -1080,10 +1191,6 @@ impl SCServer {
             .post("/v1/embeddings", create_embeddings)
             .post("/audio/device/start", start_audio_device)
             .post("/audio/device/stop", stop_audio_device)
-            // .post("/vision/start", start_vision_device)
-            // .post("/vision/stop", stop_vision_device)
-            // .post("/audio/restart", restart_audio_devices)
-            // .post("/vision/restart", restart_vision_devices)
             .route_yaml_spec("/openapi.yaml")
             .route_json_spec("/openapi.json")
             .freeze();
@@ -1398,10 +1505,11 @@ pub(crate) async fn add_to_database(
     }))
 }
 
-#[cfg(feature = "experimental")]
+#[oasgen]
 async fn input_control_handler(
-    JsonResponse(payload): JsonResponse<InputControlRequest>,
-) -> Result<JsonResponse<InputControlResponse>, (StatusCode, JsonResponse<Value>)> {
+    State(_): State<Arc<AppState>>,
+    Json(payload): Json<InputControlRequest>,
+) -> Result<JsonResponse<InputControlResponse>, (StatusCode, Json<serde_json::Value>)> {
     use enigo::{Keyboard, Mouse};
 
     info!("input control handler {:?}", payload);
@@ -1433,7 +1541,6 @@ async fn input_control_handler(
     Ok(JsonResponse(InputControlResponse { success: true }))
 }
 
-#[cfg(feature = "experimental")]
 fn key_from_string(key: &str) -> Result<Key, (StatusCode, JsonResponse<Value>)> {
     match key {
         "enter" => Ok(Key::Return),
@@ -1446,7 +1553,6 @@ fn key_from_string(key: &str) -> Result<Key, (StatusCode, JsonResponse<Value>)> 
     }
 }
 
-#[cfg(feature = "experimental")]
 fn mouse_button_from_string(
     button: &str,
 ) -> Result<enigo::Button, (StatusCode, JsonResponse<Value>)> {
@@ -1462,14 +1568,12 @@ fn mouse_button_from_string(
 }
 
 // Add these new structs:
-#[cfg(feature = "experimental")]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, OaSchema)]
 struct InputControlRequest {
     action: InputAction,
 }
 
-#[cfg(feature = "experimental")]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, OaSchema)]
 #[serde(tag = "type", content = "data")]
 enum InputAction {
     KeyPress(String),
@@ -1478,8 +1582,7 @@ enum InputAction {
     WriteText(String),
 }
 
-#[cfg(feature = "experimental")]
-#[derive(Serialize)]
+#[derive(Serialize, OaSchema)]
 struct InputControlResponse {
     success: bool,
 }
@@ -2438,20 +2541,22 @@ async fn get_pipe_build_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<Value>, (StatusCode, JsonResponse<Value>)> {
     let pipe_dir = state.screenpipe_dir.join("pipes").join(&pipe_id);
+    let update_temp_dir = std::env::temp_dir().join(format!("{}_update", pipe_id));
     let temp_dir = pipe_dir.with_extension("_temp");
 
-    // First check temp directory if it exists
-    if temp_dir.exists() {
-        let temp_pipe_json = temp_dir.join("pipe.json");
-        if temp_pipe_json.exists() {
-            let pipe_json = tokio::fs::read_to_string(&temp_pipe_json)
+    // 1. First check if the update temp directory exists
+    if update_temp_dir.exists() {
+        debug!("Update temp directory exists for pipe: {}", pipe_id);
+
+        // Check if there's a pipe.json in the update temp directory
+        let update_pipe_json_path = update_temp_dir.join("pipe.json");
+        if update_pipe_json_path.exists() {
+            let pipe_json = tokio::fs::read_to_string(&update_pipe_json_path)
                 .await
                 .map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        JsonResponse(
-                            json!({"error": format!("Failed to read temp pipe config: {}", e)}),
-                        ),
+                        JsonResponse(json!({"error": format!("Failed to read update temp pipe config: {}", e)})),
                     )
                 })?;
 
@@ -2459,44 +2564,118 @@ async fn get_pipe_build_status(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     JsonResponse(
-                        json!({"error": format!("Failed to parse temp pipe config: {}", e)}),
+                        json!({"error": format!("Failed to parse update temp pipe config: {}", e)}),
                     ),
                 )
             })?;
 
-            info!("{:?}", pipe_config);
-            let build_status = pipe_config.get("buildStatus").unwrap_or(&Value::Null);
-            return Ok(JsonResponse(json!({ "buildStatus": build_status })));
+            // Return the buildStatus if it exists
+            if let Some(build_status) = pipe_config.get("buildStatus") {
+                debug!(
+                    "Found build status in update temp directory for pipe: {}",
+                    pipe_id
+                );
+                return Ok(JsonResponse(build_status.clone()));
+            }
         }
+
+        // If no buildStatus found in update temp directory, return a default in_progress status
+        return Ok(JsonResponse(json!({
+            "status": "in_progress",
+            "step": "downloading",
+            "message": "Update in progress"
+        })));
     }
 
-    // If no temp directory or no pipe.json in temp, check the main pipe directory
-    let pipe_json_path = pipe_dir.join("pipe.json");
-    if !pipe_json_path.exists() {
+    // 2. Check if the pipe directory exists
+    if pipe_dir.exists() {
+        // Then check if there's a pipe.json file
+        let pipe_json_path = pipe_dir.join("pipe.json");
+        if pipe_json_path.exists() {
+            let pipe_json = tokio::fs::read_to_string(&pipe_json_path)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        JsonResponse(
+                            json!({"error": format!("Failed to read pipe config: {}", e)}),
+                        ),
+                    )
+                })?;
+
+            let pipe_config: Value = serde_json::from_str(&pipe_json).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    JsonResponse(json!({"error": format!("Failed to parse pipe config: {}", e)})),
+                )
+            })?;
+
+            // Check if there's a buildStatus field
+            if let Some(build_status) = pipe_config.get("buildStatus") {
+                // Return the build status directly
+                return Ok(JsonResponse(build_status.clone()));
+            }
+        } else {
+            // Pipe directory exists but pipe.json doesn't exist yet
+            // This likely means the pipe is still being created
+            debug!(
+                "Pipe directory exists but pipe.json not found for pipe: {}",
+                pipe_id
+            );
+            return Ok(JsonResponse(json!({
+                "status": "in_progress",
+                "step": "creating_config",
+                "message": "Creating pipe configuration"
+            })));
+        }
+    } else {
+        // If pipe directory doesn't exist, check temp directory
+        if temp_dir.exists() {
+            let temp_pipe_json = temp_dir.join("pipe.json");
+            if temp_pipe_json.exists() {
+                let pipe_json = tokio::fs::read_to_string(&temp_pipe_json)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            JsonResponse(
+                                json!({"error": format!("Failed to read temp pipe config: {}", e)}),
+                            ),
+                        )
+                    })?;
+
+                let pipe_config: Value = serde_json::from_str(&pipe_json).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        JsonResponse(
+                            json!({"error": format!("Failed to parse temp pipe config: {}", e)}),
+                        ),
+                    )
+                })?;
+
+                debug!("Found build status in temp directory for pipe: {}", pipe_id);
+                if let Some(build_status) = pipe_config.get("buildStatus") {
+                    return Ok(JsonResponse(build_status.clone()));
+                }
+            }
+
+            // Temp directory exists but no pipe.json or no buildStatus
+            return Ok(JsonResponse(json!({
+                "status": "in_progress",
+                "step": "initializing",
+                "message": "Initializing pipe"
+            })));
+        }
+
+        // If neither pipe directory nor temp directory exists, return not found
         return Err((
             StatusCode::NOT_FOUND,
             JsonResponse(json!({"error": "Pipe not found"})),
         ));
     }
 
-    let pipe_json = tokio::fs::read_to_string(&pipe_json_path)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                JsonResponse(json!({"error": format!("Failed to read pipe config: {}", e)})),
-            )
-        })?;
-
-    let pipe_config: Value = serde_json::from_str(&pipe_json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            JsonResponse(json!({"error": format!("Failed to parse pipe config: {}", e)})),
-        )
-    })?;
-
-    let build_status = pipe_config.get("buildStatus").unwrap_or(&Value::Null);
-    Ok(JsonResponse(json!({ "buildStatus": build_status })))
+    // If we get here, there's a pipe.json but no buildStatus field
+    Ok(JsonResponse(json!(null)))
 }
 
 #[oasgen]
@@ -2951,8 +3130,6 @@ pub struct ClickByIndexResponse {
     message: String,
 }
 
-
-
 #[derive(Debug, OaSchema, Deserialize, Serialize)]
 pub struct TypeTextRequest {
     selector: ElementSelector,
@@ -3321,7 +3498,7 @@ async fn get_text_handler(
     Json(request): Json<GetTextRequest>,
 ) -> Result<JsonResponse<GetTextResponse>, (StatusCode, JsonResponse<Value>)> {
     let start = Instant::now();
-    
+
     let desktop = match Desktop::new(
         request.use_background_apps.unwrap_or(false),
         request.activate_app.unwrap_or(false),
@@ -3365,7 +3542,7 @@ async fn get_text_handler(
     };
 
     let duration = start.elapsed();
-    
+
     Ok(JsonResponse(GetTextResponse {
         success: true,
         text,
@@ -3395,7 +3572,7 @@ pub struct ListInteractableElementsRequest {
 pub struct InteractableElement {
     index: usize,
     role: String,
-    interactability: String,  // "definite", "sometimes", "none"
+    interactability: String, // "definite", "sometimes", "none"
     text: String,
     position: Option<ElementPosition>,
     size: Option<ElementSize>,
@@ -3406,7 +3583,7 @@ pub struct InteractableElement {
 pub struct ListInteractableElementsResponse {
     elements: Vec<InteractableElement>,
     stats: ElementStats,
-    cache_info: ElementCacheInfo,  // Add this new field
+    cache_info: ElementCacheInfo, // Add this new field
 }
 
 #[derive(Debug, OaSchema, Serialize)]
@@ -3435,16 +3612,34 @@ async fn list_interactable_elements_handler(
 ) -> Result<JsonResponse<ListInteractableElementsResponse>, (StatusCode, JsonResponse<Value>)> {
     // First, set up the definitely and sometimes interactable role sets
     let definitely_interactable: HashSet<&str> = [
-        "AXButton", "AXMenuItem", "AXMenuBarItem", "AXCheckBox", "AXPopUpButton",
-        "AXTextField", "AXTextArea", "AXComboBox", "AXLink", "AXScrollBar",
+        "AXButton",
+        "AXMenuItem",
+        "AXMenuBarItem",
+        "AXCheckBox",
+        "AXPopUpButton",
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXLink",
+        "AXScrollBar",
         // ... other definitely interactable roles
-    ].iter().cloned().collect();
-    
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     let sometimes_interactable: HashSet<&str> = [
-        "AXImage", "AXCell", "AXSplitter", "AXRow", "AXStatusItem",
+        "AXImage",
+        "AXCell",
+        "AXSplitter",
+        "AXRow",
+        "AXStatusItem",
         // ... other sometimes interactable roles
-    ].iter().cloned().collect();
-    
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     // Create desktop automation engine
     let desktop = match Desktop::new(
         request.use_background_apps.unwrap_or(false),
@@ -3474,7 +3669,7 @@ async fn list_interactable_elements_handler(
             ));
         }
     };
-    
+
     // Get elements from the application
     let locator = match app.locator("") {
         Ok(locator) => locator,
@@ -3499,7 +3694,7 @@ async fn list_interactable_elements_handler(
             ));
         }
     };
-    
+
     info!("found {} elements in {}", elements.len(), request.app_name);
 
     // Filter and convert elements
@@ -3511,13 +3706,13 @@ async fn list_interactable_elements_handler(
         non_interactable: 0,
         by_role: HashMap::new(),
     };
-    
+
     for (i, element) in elements.iter().enumerate() {
         let role = element.role();
-        
+
         // Count by role
         *stats.by_role.entry(role.clone()).or_insert(0) += 1;
-        
+
         // Determine interactability
         let interactability = if definitely_interactable.contains(role.as_str()) {
             stats.definitely_interactable += 1;
@@ -3529,52 +3724,59 @@ async fn list_interactable_elements_handler(
             stats.non_interactable += 1;
             "none"
         };
-        
+
         // Extract text from element
         let text = element.text(10).unwrap_or_default();
-        
+
         // Apply filters
         let with_text_condition = !request.with_text_only.unwrap_or(false) || !text.is_empty();
-        let interactable_condition = !request.interactable_only.unwrap_or(false) || 
-            (interactability == "definite" || 
-             (request.include_sometimes_interactable.unwrap_or(false) && interactability == "sometimes"));
-        
+        let interactable_condition = !request.interactable_only.unwrap_or(false)
+            || (interactability == "definite"
+                || (request.include_sometimes_interactable.unwrap_or(false)
+                    && interactability == "sometimes"));
+
         if with_text_condition && interactable_condition {
             let (x, y, width, height) = element.bounds().ok().unwrap_or((0.0, 0.0, 0.0, 0.0));
-            
+
             result_elements.push(InteractableElement {
                 index: i,
                 role: role.clone(),
                 interactability: interactability.to_string(),
                 text,
-                position: Some(ElementPosition { x: x as i32, y: y as i32 }),
-                size: Some(ElementSize { width: width as i32, height: height as i32 }),
+                position: Some(ElementPosition {
+                    x: x as i32,
+                    y: y as i32,
+                }),
+                size: Some(ElementSize {
+                    width: width as i32,
+                    height: height as i32,
+                }),
                 element_id: element.id(),
             });
         }
     }
-    
+
     // Apply max_elements limit if specified
     if let Some(max) = request.max_elements {
         if result_elements.len() > max {
             result_elements.truncate(max);
         }
     }
-    
+
     // Generate a cache ID and store elements in cache
     let cache_id = Uuid::new_v4().to_string();
     let cache_timestamp = Instant::now();
     let ttl_seconds: u64 = 30; // Explicitly specify u64 type
-    
+
     {
         let mut cache = state.element_cache.lock().await;
         *cache = Some((elements.clone(), cache_timestamp, request.app_name.clone()));
     }
-    
+
     // Create cache info for response
     let now = Utc::now();
     let expires_at = now + chrono::Duration::seconds(ttl_seconds as i64);
-    
+
     let cache_info = ElementCacheInfo {
         cache_id: cache_id.clone(),
         timestamp: now.to_rfc3339(),
@@ -3582,7 +3784,7 @@ async fn list_interactable_elements_handler(
         element_count: elements.len(),
         ttl_seconds: ttl_seconds,
     };
-    
+
     Ok(JsonResponse(ListInteractableElementsResponse {
         elements: result_elements,
         stats,
@@ -3600,7 +3802,7 @@ async fn click_by_index_handler(
         let cache = state.element_cache.lock().await;
         cache.clone()
     };
-    
+
     // First check if cache exists at all
     if elements_opt.is_none() {
         return Err((
@@ -3610,18 +3812,21 @@ async fn click_by_index_handler(
             })),
         ));
     }
-    
+
     // Then proceed with the rest of the logic...
     match elements_opt {
         Some((elements, timestamp, _app_name)) if timestamp.elapsed() < Duration::from_secs(30) => {
             // Use element_index directly
             if request.element_index < elements.len() {
                 let element = &elements[request.element_index];
-                
+
                 match element.click() {
                     Ok(_) => Ok(JsonResponse(ClickByIndexResponse {
                         success: true,
-                        message: format!("Successfully clicked element with role: {}", element.role()),
+                        message: format!(
+                            "Successfully clicked element with role: {}",
+                            element.role()
+                        ),
                     })),
                     Err(e) => {
                         error!("failed to click element: {}", e);
@@ -3634,17 +3839,20 @@ async fn click_by_index_handler(
                     }
                 }
             } else {
-                error!("element index out of bounds: {} (max: {})", 
-                       request.element_index, elements.len() - 1);
+                error!(
+                    "element index out of bounds: {} (max: {})",
+                    request.element_index,
+                    elements.len() - 1
+                );
                 Err((
                     StatusCode::BAD_REQUEST,
                     JsonResponse(json!({
-                        "error": format!("element index out of bounds: {} (max: {})", 
+                        "error": format!("element index out of bounds: {} (max: {})",
                                         request.element_index, elements.len() - 1)
                     })),
                 ))
             }
-        },
+        }
         Some(_) => {
             // Cache entry expired
             // error!("cache entry expired for id: {}", request.cache_id);
@@ -3654,7 +3862,7 @@ async fn click_by_index_handler(
                     "error": "cache entry expired, please list elements again"
                 })),
             ))
-        },
+        }
         None => {
             // Cache miss
             // error!("no cache entry found for id: {}", request.cache_id);
@@ -3692,7 +3900,7 @@ async fn type_by_index_handler(
         let cache = state.element_cache.lock().await;
         cache.clone()
     };
-    
+
     // First check if cache exists at all
     if elements_opt.is_none() {
         return Err((
@@ -3702,18 +3910,21 @@ async fn type_by_index_handler(
             })),
         ));
     }
-    
+
     // Then proceed with the logic...
     match elements_opt {
         Some((elements, timestamp, _app_name)) if timestamp.elapsed() < Duration::from_secs(30) => {
             // Use element_index directly
             if request.element_index < elements.len() {
                 let element = &elements[request.element_index];
-                
+
                 match element.type_text(&request.text) {
                     Ok(_) => Ok(JsonResponse(TypeByIndexResponse {
                         success: true,
-                        message: format!("successfully typed text into element with role: {}", element.role()),
+                        message: format!(
+                            "successfully typed text into element with role: {}",
+                            element.role()
+                        ),
                     })),
                     Err(e) => {
                         error!("failed to type text into element: {}", e);
@@ -3726,17 +3937,20 @@ async fn type_by_index_handler(
                     }
                 }
             } else {
-                error!("element index out of bounds: {} (max: {})", 
-                       request.element_index, elements.len() - 1);
+                error!(
+                    "element index out of bounds: {} (max: {})",
+                    request.element_index,
+                    elements.len() - 1
+                );
                 Err((
                     StatusCode::BAD_REQUEST,
                     JsonResponse(json!({
-                        "error": format!("element index out of bounds: {} (max: {})", 
+                        "error": format!("element index out of bounds: {} (max: {})",
                                         request.element_index, elements.len() - 1)
                     })),
                 ))
             }
-        },
+        }
         Some(_) => {
             // Cache entry expired
             Err((
@@ -3745,7 +3959,7 @@ async fn type_by_index_handler(
                     "error": "cache entry expired, please list elements again"
                 })),
             ))
-        },
+        }
         None => {
             // Cache miss
             Err((
@@ -3778,7 +3992,7 @@ async fn press_key_handler(
     Json(request): Json<PressKeyRequest>,
 ) -> Result<JsonResponse<PressKeyResponse>, (StatusCode, JsonResponse<Value>)> {
     debug!(target: "operator", "pressing key combination: {}", request.key_combo);
-    
+
     let desktop = match Desktop::new(
         request.selector.use_background_apps.unwrap_or(false),
         request.selector.activate_app.unwrap_or(false),
@@ -3809,7 +4023,7 @@ async fn press_key_handler(
     };
 
     debug!(target: "operator", "app: {:?}", app);
-    
+
     // Find elements matching the selector
     let element = match app.locator(request.selector.locator.as_str()) {
         Ok(locator) => match locator.first() {
@@ -3841,8 +4055,11 @@ async fn press_key_handler(
         Some(element) => match element.press_key(&request.key_combo) {
             Ok(_) => Ok(JsonResponse(PressKeyResponse {
                 success: true,
-                message: format!("successfully pressed key combination '{}' on element with role: {}", 
-                    request.key_combo, element.role()),
+                message: format!(
+                    "successfully pressed key combination '{}' on element with role: {}",
+                    request.key_combo,
+                    element.role()
+                ),
             })),
             Err(e) => {
                 error!("failed to press key: {}", e);
@@ -3884,13 +4101,13 @@ async fn press_key_by_index_handler(
 ) -> Result<JsonResponse<PressKeyByIndexResponse>, (StatusCode, JsonResponse<Value>)> {
     debug!(target: "operator", "pressing key combination by index: element_index={}, key_combo={}", 
         request.element_index, request.key_combo);
-    
+
     // Get elements from cache
     let elements_opt = {
         let cache = state.element_cache.lock().await;
         cache.clone()
     };
-    
+
     // First check if cache exists at all
     if elements_opt.is_none() {
         return Err((
@@ -3900,13 +4117,14 @@ async fn press_key_by_index_handler(
             })),
         ));
     }
-    
+
     // Then proceed with the logic...
     match elements_opt {
         Some((elements, timestamp, app_name)) if timestamp.elapsed() < Duration::from_secs(30) => {
             // Activate the app first
             debug!(target: "operator", "activating app: {}", app_name);
-            let desktop = match Desktop::new(false, true) { // Set activate_app to true
+            let desktop = match Desktop::new(false, true) {
+                // Set activate_app to true
                 Ok(d) => d,
                 Err(e) => {
                     error!("failed to initialize desktop automation: {}", e);
@@ -3932,16 +4150,19 @@ async fn press_key_by_index_handler(
                     ));
                 }
             };
-            
+
             // Use element_index directly
             if request.element_index < elements.len() {
                 let element = &elements[request.element_index];
-                
+
                 match element.press_key(&request.key_combo) {
                     Ok(_) => Ok(JsonResponse(PressKeyByIndexResponse {
                         success: true,
-                        message: format!("successfully pressed key combination '{}' on element with role: {}", 
-                            request.key_combo, element.role()),
+                        message: format!(
+                            "successfully pressed key combination '{}' on element with role: {}",
+                            request.key_combo,
+                            element.role()
+                        ),
                     })),
                     Err(e) => {
                         error!("failed to press key on element: {}", e);
@@ -3954,17 +4175,20 @@ async fn press_key_by_index_handler(
                     }
                 }
             } else {
-                error!("element index out of bounds: {} (max: {})", 
-                       request.element_index, elements.len() - 1);
+                error!(
+                    "element index out of bounds: {} (max: {})",
+                    request.element_index,
+                    elements.len() - 1
+                );
                 Err((
                     StatusCode::BAD_REQUEST,
                     JsonResponse(json!({
-                        "error": format!("element index out of bounds: {} (max: {})", 
+                        "error": format!("element index out of bounds: {} (max: {})",
                                        request.element_index, elements.len() - 1)
                     })),
                 ))
             }
-        },
+        }
         Some(_) => {
             // Cache entry expired
             Err((
@@ -3973,7 +4197,7 @@ async fn press_key_by_index_handler(
                     "error": "cache entry expired, please list elements again"
                 })),
             ))
-        },
+        }
         None => {
             // Cache miss
             Err((
@@ -3986,3 +4210,88 @@ async fn press_key_by_index_handler(
     }
 }
 
+// Add these new structs for opening applications
+#[derive(Deserialize, OaSchema)]
+pub struct OpenApplicationRequest {
+    app_name: String,
+}
+
+#[derive(Serialize, OaSchema)]
+pub struct OpenApplicationResponse {
+    success: bool,
+    message: String,
+}
+
+// Add these new structs for opening URLs
+#[derive(Deserialize, OaSchema)]
+pub struct OpenUrlRequest {
+    url: String,
+    browser: Option<String>,
+}
+
+#[derive(Serialize, OaSchema)]
+pub struct OpenUrlResponse {
+    success: bool,
+    message: String,
+}
+
+// Add handler for opening applications
+#[oasgen]
+async fn open_application_handler(
+    State(_): State<Arc<AppState>>,
+    Json(request): Json<OpenApplicationRequest>,
+) -> Result<JsonResponse<OpenApplicationResponse>, (StatusCode, JsonResponse<Value>)> {
+    // Create Desktop automation instance
+    let desktop = match Desktop::new(false, true) {
+        Ok(desktop) => desktop,
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": format!("Failed to initialize automation: {}", err)})),
+            ));
+        }
+    };
+
+    // Open the application
+    match desktop.open_application(&request.app_name) {
+        Ok(_) => Ok(JsonResponse(OpenApplicationResponse {
+            success: true,
+            message: format!("Successfully opened application: {}", request.app_name),
+        })),
+        Err(err) => Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": format!("Failed to open application: {}", err)})),
+        )),
+    }
+}
+
+// Add handler for opening URLs
+#[oasgen]
+async fn open_url_handler(
+    State(_): State<Arc<AppState>>,
+    Json(request): Json<OpenUrlRequest>,
+) -> Result<JsonResponse<OpenUrlResponse>, (StatusCode, JsonResponse<Value>)> {
+    // Create Desktop automation instance
+    let desktop = match Desktop::new(false, true) {
+        Ok(desktop) => desktop,
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(json!({"error": format!("Failed to initialize automation: {}", err)})),
+            ));
+        }
+    };
+
+    // Open the URL
+    let browser_ref = request.browser.as_deref();
+    match desktop.open_url(&request.url, browser_ref) {
+        Ok(_) => Ok(JsonResponse(OpenUrlResponse {
+            success: true,
+            message: format!("Successfully opened URL: {}", request.url),
+        })),
+        Err(err) => Err((
+            StatusCode::BAD_REQUEST,
+            JsonResponse(json!({"error": format!("Failed to open URL: {}", err)})),
+        )),
+    }
+}

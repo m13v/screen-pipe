@@ -1,8 +1,8 @@
 use crate::operator::element::UIElementImpl;
 use crate::operator::platforms::AccessibilityEngine;
 use crate::operator::{AutomationError, Locator, Selector, UIElement, UIElementAttributes};
-use crate::operator::platforms::macos::{ClickResult, ClickMethod, ClickMethodSelection};
 use std::fmt::Debug;
+use crate::operator::ClickResult;
 
 pub struct WindowsEngine;
 
@@ -62,6 +62,18 @@ impl AccessibilityEngine for WindowsEngine {
             "Windows implementation is not yet available".to_string(),
         ))
     }
+
+    fn open_application(&self, _app_name: &str) -> Result<UIElement, AutomationError> {
+        Err(AutomationError::UnsupportedPlatform(
+            "Windows implementation is not yet available".to_string(),
+        ))
+    }
+
+    fn open_url(&self, _url: &str, _browser: Option<&str>) -> Result<UIElement, AutomationError> {
+        Err(AutomationError::UnsupportedPlatform(
+            "Windows implementation is not yet available".to_string(),
+        ))
+    }
 }
 
 // Placeholder WindowsUIElement that implements UIElementImpl
@@ -115,12 +127,6 @@ impl UIElementImpl for WindowsUIElement {
     }
 
     fn click(&self) -> Result<ClickResult, AutomationError> {
-        Err(AutomationError::UnsupportedPlatform(
-            "Windows implementation is not yet available".to_string(),
-        ))
-    }
-
-    fn click_with_method(&self, _method: ClickMethodSelection) -> Result<ClickResult, AutomationError> {
         Err(AutomationError::UnsupportedPlatform(
             "Windows implementation is not yet available".to_string(),
         ))
