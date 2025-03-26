@@ -79,8 +79,6 @@ export async function processUserQuery(query: string, maxTokens = 1000000, maxIt
         const toolName = content.name;
         const toolArgs = content.input;
         
-        console.log(`executing tool: ${toolName} with args:`, toolArgs);
-        
         // Execute the tool via MCP
         try {
           const result = await desktopClient.callTool(toolName, toolArgs as Record<string, any>);
@@ -91,8 +89,6 @@ export async function processUserQuery(query: string, maxTokens = 1000000, maxIt
             JSON.stringify(result) : 
             String(result);
           
-          console.log(`tool ${toolName} returned result:`, resultContent);
-          
           toolResultContent.push({
             type: "tool_result",
             tool_use_id: content.id,
@@ -100,8 +96,6 @@ export async function processUserQuery(query: string, maxTokens = 1000000, maxIt
           });
           
         } catch (error) {
-          console.error(`error executing tool ${toolName}:`, error);
-          
           // Add error result as string
           toolResultContent.push({
             type: "tool_result",
