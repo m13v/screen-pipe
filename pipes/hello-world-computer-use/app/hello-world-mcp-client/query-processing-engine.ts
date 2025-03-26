@@ -8,10 +8,9 @@ const anthropic = new Anthropic({
 });
 
 // Use the correct type from Anthropic SDK
-let conversationHistory: {role: "user" | "assistant"; content: string}[] = [];
+let conversationHistory: {role: "user" | "assistant"; content: any}[] = [];
 
-export async function processUserQuery(query: string) {
-
+export async function processUserQuery(query: string, maxTokens = 1000000, maxIterations = 100) {
   // Get available tools
   const toolsResponse = await desktopClient.listTools();
   const tools = toolsResponse.tools.map(tool => ({
@@ -26,73 +25,106 @@ export async function processUserQuery(query: string) {
     content: query 
   });
   
-  // Call Claude with tools and history
-  const response = await anthropic.messages.create({
-    model: "claude-3-7-sonnet-20250219",
-    max_tokens: 1024,
-    messages: conversationHistory,
-    tools,
-  });
-  
-  // Process the response and handle tool calls
+  // Implement proper agent loop
+  let isProcessing = true;
   let finalResponse = "";
+  let totalTokensUsed = 0;
+  let iterations = 0;
   
-  for (const content of response.content) {
-    if (content.type === "text") {
-      finalResponse += content.text;
-    } else if (content.type === "tool_use") {
-      // Extract tool call information
-      const toolName = content.name;
-      const toolArgs = content.input;
-      
-      // Execute the tool via MCP
-      try {
-        const result = await desktopClient.callTool(toolName, toolArgs as Record<string, any>);
+  console.log("starting agent loop with query:", query);
+  
+  while (isProcessing) {
+    // Safety check - prevent infinite loops or excessive token usage
+    iterations++;
+    if (iterations > maxIterations) {
+      console.log(`reached maximum iterations (${maxIterations}), stopping loop`);
+      finalResponse += "\n[maximum iterations reached. process stopped.]";
+      break;  
+    }
+    
+    if (totalTokensUsed > maxTokens) {
+      console.log(`exceeded maximum token limit (${maxTokens}), stopping loop`);
+      finalResponse += "\n[maximum token limit reached. process stopped.]";
+      break;
+    }
+    
+    // Call Claude with tools and history
+    const response = await anthropic.messages.create({
+      model: "claude-3-7-sonnet-20250219",
+      max_tokens: 1024,
+      messages: conversationHistory,
+      tools,
+    });
+    
+    // Track token usage
+    totalTokensUsed += response.usage.output_tokens + response.usage.input_tokens;
+    console.log(`iteration ${iterations}: total tokens used: ${totalTokensUsed}`);
+    
+    // Add Claude's response to conversation history
+    conversationHistory.push({
+      role: "assistant" as const,
+      content: response.content
+    });
+    
+    // Check if any tool calls were made
+    let hasToolCalls = false;
+    let toolResultContent = [];
+    
+    for (const content of response.content) {
+      if (content.type === "text") {
+        finalResponse += content.text;
+      } else if (content.type === "tool_use") {
+        hasToolCalls = true;
+        // Extract tool call information
+        const toolName = content.name;
+        const toolArgs = content.input;
         
-        // Send tool result back to LLM
-        const toolResultMessage = {
-          role: "user" as const, 
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: content.id,
-              content: result
-            }
-          ]
-        };
+        console.log(`executing tool: ${toolName} with args:`, toolArgs);
         
-        // Get final response with tool result
-        const newConversation = [
-          // Add user's original query
-          { role: "user" as const, content: query },
-          // Add assistant's tool use
-          { role: "assistant" as const, content: `I'll help you with that using a tool.` },
-          // Add tool result as user message
-          { role: "user" as const, content: `Tool result: ${JSON.stringify(result)}` }
-        ];
-        
-        const finalLLMResponse = await anthropic.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 1024,
-          messages: newConversation
-        });
-        
-        // Check content type before accessing text property
-        if (finalLLMResponse.content[0].type === 'text') {
-          finalResponse += finalLLMResponse.content[0].text;
+        // Execute the tool via MCP
+        try {
+          const result = await desktopClient.callTool(toolName, toolArgs as Record<string, any>);
+          
+          // Format tool result for conversation history
+          // Convert object results to strings to match Anthropic's API requirements
+          const resultContent = typeof result === 'object' ? 
+            JSON.stringify(result) : 
+            String(result);
+          
+          console.log(`tool ${toolName} returned result:`, resultContent);
+          
+          toolResultContent.push({
+            type: "tool_result",
+            tool_use_id: content.id,
+            content: resultContent
+          });
+          
+        } catch (error) {
+          console.error(`error executing tool ${toolName}:`, error);
+          
+          // Add error result as string
+          toolResultContent.push({
+            type: "tool_result",
+            tool_use_id: content.id,
+            content: `Error: ${error}`,
+            is_error: true
+          });
         }
-      } catch (error) {
-        finalResponse += `\n[Error executing tool ${toolName}: ${error}]`;
       }
     }
-  }
-  
-  // Add Claude's response to history before returning
-  if (response.content[0]?.type === "text") {
-    conversationHistory.push({ 
-      role: "assistant" as const, 
-      content: response.content[0].text 
-    });
+    
+    // If tools were used, add results to history and continue loop
+    if (hasToolCalls) {
+      conversationHistory.push({
+        role: "user" as const,
+        content: toolResultContent
+      });
+      console.log("added tool results, continuing agent loop");
+    } else {
+      // No tools used, we're done
+      isProcessing = false;
+      console.log("agent loop complete, no more tool calls");
+    }
   }
   
   return finalResponse;
