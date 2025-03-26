@@ -19,6 +19,13 @@ pub use errors::AutomationError;
 pub use locator::Locator;
 pub use selector::Selector;
 
+// Define a new struct to hold click result information - move to module level
+pub struct ClickResult {
+    pub method: String,
+    pub coordinates: Option<(f64, f64)>,
+    pub details: String,
+}
+
 /// The main entry point for UI automation
 pub struct Desktop {
     engine: Arc<dyn platforms::AccessibilityEngine>,
@@ -56,5 +63,15 @@ impl Desktop {
     /// Find an application by name
     pub fn application(&self, name: &str) -> Result<UIElement, AutomationError> {
         self.engine.get_application_by_name(name)
+    }
+
+    /// Open an application by name
+    pub fn open_application(&self, app_name: &str) -> Result<UIElement, AutomationError> {
+        self.engine.open_application(app_name)
+    }
+
+    /// Open a URL in a specified browser (or default browser if None)
+    pub fn open_url(&self, url: &str, browser: Option<&str>) -> Result<UIElement, AutomationError> {
+        self.engine.open_url(url, browser)
     }
 }
